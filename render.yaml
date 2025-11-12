@@ -6,6 +6,9 @@ services:
     autoDeploy: true
     healthCheckPath: /api/health/ready
     dockerfilePath: backend/Dockerfile
+    postdeploy: |
+      npx prisma generate --schema=backend/prisma/schema.prisma
+      npx prisma migrate deploy --schema=backend/prisma/schema.prisma
     envVars:
       - key: DATABASE_URL
         fromDatabase:

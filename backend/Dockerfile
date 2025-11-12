@@ -16,5 +16,5 @@ RUN nest build
 
 EXPOSE 4000
 
-# At runtime (when DATABASE_URL is available on Render), generate client and run migrations, then start
-CMD ["sh", "-c", "npx prisma generate --schema=prisma/schema.prisma && npx prisma migrate deploy --schema=prisma/schema.prisma && npm run start:prod"]
+# Start the application (Prisma generate/migrate will run in Render postdeploy)
+CMD ["npm", "run", "start:prod"]
