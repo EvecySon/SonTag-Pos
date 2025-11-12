@@ -14,7 +14,7 @@ RUN npm install --include=dev && npm install -g @nestjs/cli
 COPY backend/. ./
 
 # Generate Prisma Client at build time so engine binaries are bundled
-RUN npx prisma generate --schema=prisma/schema.prisma
+RUN ./node_modules/.bin/prisma generate --schema=prisma/schema.prisma
 
 # Build (no DB access required here)
 RUN nest build
