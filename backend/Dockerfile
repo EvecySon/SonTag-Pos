@@ -12,7 +12,7 @@ RUN npm install --include=dev
 COPY backend/. ./
 
 # Build (no DB access required here)
-RUN npm run build
+RUN npx nest build
 
 EXPOSE 4000
 
