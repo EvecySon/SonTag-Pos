@@ -1,7 +1,9 @@
-FROM node:20-alpine
+FROM node:20-slim
 
 # Install necessary build tools for native modules
-RUN apk add --no-cache python3 make g++
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -10,6 +12,9 @@ COPY backend/package*.json ./
 # Install with devDependencies so Nest CLI is available for build
 RUN npm install --include=dev && npm install -g @nestjs/cli
 COPY backend/. ./
+
+# Generate Prisma Client at build time so engine binaries are bundled
+RUN npx prisma generate --schema=prisma/schema.prisma
 
 # Build (no DB access required here)
 RUN nest build

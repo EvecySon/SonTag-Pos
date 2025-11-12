@@ -212,8 +212,8 @@ model LeaveRequest {
 
 generator client {
   provider = "prisma-client-js"
-  // Include native for local dev and linux-musl for alpine-based containers
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  // Include native for local dev, linux-musl for Alpine, and debian for Debian-based images
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
 model StockMovement {
