@@ -18,7 +18,19 @@ let BranchesService = class BranchesService {
         this.prisma = prisma;
     }
     async findAll() {
-        return this.prisma.branch.findMany({ orderBy: { name: 'asc' } });
+        return this.prisma.branch.findMany({
+            orderBy: { name: 'asc' },
+            include: {
+                sections: { select: { id: true, name: true } },
+                _count: { select: { sections: true, users: true } },
+            },
+        });
+    }
+    async findPublic() {
+        return this.prisma.branch.findMany({
+            orderBy: { name: 'asc' },
+            select: { id: true, name: true },
+        });
     }
     async create(dto, role) {
         if (role !== 'ADMIN' && role !== 'MANAGER')
@@ -32,6 +44,68 @@ let BranchesService = class BranchesService {
         if (!existing)
             throw new common_1.NotFoundException('Branch not found');
         return this.prisma.branch.update({ where: { id }, data: dto });
+    }
+    async remove(id, role) {
+        if (role !== 'ADMIN' && role !== 'MANAGER')
+            throw new common_1.ForbiddenException('Insufficient role');
+        const existing = await this.prisma.branch.findUnique({
+            where: { id },
+            include: {
+                _count: {
+                    select: {
+                        sections: true,
+                        users: true,
+                        products: true,
+                        orders: true,
+                        inventory: true,
+                        drafts: true,
+                        priceLists: true,
+                        expenses: true,
+                        suppliers: true,
+                        purchases: true,
+                        customers: true,
+                        brands: true,
+                        categories: true,
+                        subcategories: true,
+                        sectionFunctions: true,
+                        productTypes: true,
+                        serviceTypes: true,
+                        appRoles: true,
+                    },
+                },
+            },
+        });
+        if (!existing)
+            throw new common_1.NotFoundException('Branch not found');
+        const c = existing._count;
+        const blockers = [];
+        const check = (key, label) => { if (c?.[key] && c[key] > 0)
+            blockers.push(`${label} (${c[key]})`); };
+        check('sections', 'sections');
+        check('users', 'users');
+        check('products', 'products');
+        check('orders', 'orders');
+        check('inventory', 'inventory');
+        check('drafts', 'drafts');
+        check('priceLists', 'price lists');
+        check('expenses', 'expenses');
+        check('suppliers', 'suppliers');
+        check('purchases', 'purchases');
+        check('customers', 'customers');
+        check('brands', 'brands');
+        check('categories', 'categories');
+        check('subcategories', 'subcategories');
+        check('sectionFunctions', 'section functions');
+        check('productTypes', 'product types');
+        check('serviceTypes', 'service types');
+        if (blockers.length > 0) {
+            throw new common_1.BadRequestException(`Cannot delete branch because it has related data: ${blockers.join(', ')}. Please move or delete these items first.`);
+        }
+        return await this.prisma.$transaction(async (tx) => {
+            await tx.setting.updateMany({ where: { branchId: id }, data: { branchId: null } });
+            await tx.appRole.deleteMany({ where: { branchId: id } });
+            return tx.branch.delete({ where: { id } });
+        });
     }
 };
 exports.BranchesService = BranchesService;

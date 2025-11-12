@@ -18,7 +18,7 @@ let PricingService = class PricingService {
         this.prisma = prisma;
     }
     async getEffectivePrices(branchId, sectionId) {
-        const priceList = await this.prisma.priceList.findFirst({
+        const priceList = (await this.prisma.priceList.findFirst({
             where: {
                 branchId,
                 active: true,
@@ -26,26 +26,40 @@ let PricingService = class PricingService {
             },
             include: { entries: true },
             orderBy: { createdAt: 'desc' },
-        }) || await this.prisma.priceList.findFirst({
-            where: { branchId, active: true, sectionId: null },
-            include: { entries: true },
-            orderBy: { createdAt: 'desc' },
-        });
+        })) ||
+            (await this.prisma.priceList.findFirst({
+                where: { branchId, active: true, sectionId: null },
+                include: { entries: true },
+                orderBy: { createdAt: 'desc' },
+            }));
         const entriesMap = {};
+        const toNum = (v) => {
+            if (v === null || v === undefined)
+                return 0;
+            const n = Number(v.valueOf ? v.valueOf() : v);
+            if (Number.isFinite(n))
+                return n;
+            const p = parseFloat(String(v));
+            return Number.isFinite(p) ? p : 0;
+        };
         if (priceList) {
             for (const e of priceList.entries) {
-                entriesMap[e.productId] = parseFloat(e.price || '0');
+                entriesMap[e.productId] = toNum(e.price);
             }
         }
-        const products = await this.prisma.product.findMany({ where: { branchId } });
+        const products = await this.prisma.product.findMany({
+            where: { branchId },
+        });
         for (const p of products) {
             if (entriesMap[p.id] === undefined) {
-                entriesMap[p.id] = parseFloat(p.price || '0');
+                entriesMap[p.id] = toNum(p.price);
             }
         }
         return entriesMap;
     }
-    async createPriceList(dto) {
+    async createPriceList(dto, role) {
+        if (role !== 'ADMIN' && role !== 'MANAGER')
+            throw new common_1.ForbiddenException('Insufficient role');
         return this.prisma.priceList.create({
             data: {
                 name: dto.name,
@@ -55,12 +69,50 @@ let PricingService = class PricingService {
             },
         });
     }
-    async upsertPriceEntry(dto) {
-        const pl = await this.prisma.priceList.findUnique({ where: { id: dto.priceListId } });
+    async ensureActivePriceList(branchId, sectionId, role) {
+        if (role && role !== 'ADMIN' && role !== 'MANAGER') {
+            throw new common_1.ForbiddenException('Insufficient role');
+        }
+        if (!branchId) {
+            const first = await this.prisma.branch.findFirst({ select: { id: true }, orderBy: { createdAt: 'asc' } });
+            branchId = first?.id;
+        }
+        if (!branchId)
+            throw new common_1.NotFoundException('Branch not found');
+        const existing = await this.prisma.priceList.findFirst({
+            where: { branchId, active: true, sectionId: sectionId ?? null },
+            orderBy: { createdAt: 'desc' },
+        });
+        if (existing)
+            return existing;
+        await this.prisma.priceList.updateMany({
+            where: { branchId, sectionId: sectionId ?? null, active: true },
+            data: { active: false },
+        });
+        return this.prisma.priceList.create({
+            data: {
+                name: sectionId ? `Section-${sectionId}` : `Branch-${branchId}`,
+                branchId: branchId,
+                sectionId: sectionId ?? null,
+                active: true,
+            },
+        });
+    }
+    async upsertPriceEntry(dto, role) {
+        if (role !== 'ADMIN' && role !== 'MANAGER')
+            throw new common_1.ForbiddenException('Insufficient role');
+        const pl = await this.prisma.priceList.findUnique({
+            where: { id: dto.priceListId },
+        });
         if (!pl)
             throw new common_1.NotFoundException('Price list not found');
         const existing = await this.prisma.priceEntry.findUnique({
-            where: { priceListId_productId: { priceListId: dto.priceListId, productId: dto.productId } },
+            where: {
+                priceListId_productId: {
+                    priceListId: dto.priceListId,
+                    productId: dto.productId,
+                },
+            },
         });
         if (existing) {
             return this.prisma.priceEntry.update({

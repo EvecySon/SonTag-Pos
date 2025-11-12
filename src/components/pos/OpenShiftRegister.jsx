@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/use-toast';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { api } from '@/lib/api';
 
 const OpenShiftRegister = ({ onShiftOpen, user }) => {
   const [openingCash, setOpeningCash] = useState('');
@@ -15,15 +16,76 @@ const OpenShiftRegister = ({ onShiftOpen, user }) => {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    const savedBranches = localStorage.getItem('loungeBranches');
-    if (savedBranches && user.branchId) {
-      const allBranches = JSON.parse(savedBranches);
-      const currentBranch = allBranches.find(b => b.id.toString() === user.branchId.toString());
-      if (currentBranch && currentBranch.sections) {
-        setBranchSections(currentBranch.sections);
+    const loadSections = async () => {
+      try {
+        console.debug('[OpenShiftRegister] mount: start checks');
+        // Immediate user-scoped/current check to avoid showing modal if a shift is already open
+        try {
+          const meCur = await api.shifts.currentMe();
+          if (meCur && meCur.id && !meCur.closedAt) { console.debug('[OpenShiftRegister] current(me) hit'); try { await api.users.updateRuntime({ lastShiftId: meCur.id, lastShiftSection: meCur.sectionId, lastShiftBranch: meCur.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: meCur.sectionId, branchId: meCur.branchId }); } catch {} onShiftOpen(meCur); return; }
+        } catch {}
+        try {
+          const curAny = await api.shifts.current({});
+          if (curAny && curAny.id && !curAny.closedAt) { console.debug('[OpenShiftRegister] current(any) hit'); try { await api.users.updateRuntime({ lastShiftId: curAny.id, lastShiftSection: curAny.sectionId, lastShiftBranch: curAny.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: curAny.sectionId, branchId: curAny.branchId }); } catch {} onShiftOpen(curAny); return; }
+        } catch {}
+
+        // Load sections; allow backend to derive branch if not provided
+        let rows = await api.sections.list({ branchId: user?.branchId || undefined });
+        if (!Array.isArray(rows) || rows.length === 0) {
+          // Try auto-provision default section
+          try {
+            if (user?.branchId) {
+              await api.sections.create({ branchId: user.branchId, name: 'Main' });
+              rows = await api.sections.list({ branchId: user.branchId });
+            }
+          } catch (e) {
+            toast({ title: 'No sections found', description: 'Please add a section in Branch Management.', variant: 'destructive' });
+          }
+        }
+        const arr = Array.isArray(rows) ? rows : [];
+        setBranchSections(arr);
+        if (arr.length > 0 && !selectedSectionId) {
+          const preferred = arr.find(s => {
+            const n = String(s.name || '').toLowerCase();
+            return !(n.includes('store') || n.includes('kitchen'));
+          }) || arr[0];
+          setSelectedSectionId(preferred.id);
+        }
+        // After sections load, probe for an already-open shift and auto-enter POS
+        try {
+          // 0) Try current (me/any) again in case sections finished loading meanwhile
+          try {
+            const meCur2 = await api.shifts.currentMe();
+            if (meCur2 && meCur2.id && !meCur2.closedAt) { console.debug('[OpenShiftRegister] current(me) hit after sections'); try { await api.users.updateRuntime({ lastShiftId: meCur2.id, lastShiftSection: meCur2.sectionId, lastShiftBranch: meCur2.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: meCur2.sectionId, branchId: meCur2.branchId }); } catch {} onShiftOpen(meCur2); return; }
+          } catch {}
+          try {
+            const curAny2 = await api.shifts.current({});
+            if (curAny2 && curAny2.id && !curAny2.closedAt) { console.debug('[OpenShiftRegister] current(any) hit after sections'); try { await api.users.updateRuntime({ lastShiftId: curAny2.id, lastShiftSection: curAny2.sectionId, lastShiftBranch: curAny2.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: curAny2.sectionId, branchId: curAny2.branchId }); } catch {} onShiftOpen(curAny2); return; }
+          } catch {}
+          // 1) Prefer OPEN list
+          const resp = await api.shifts.list({ branchId: user.branchId, status: 'OPEN', limit: 1, offset: 0 });
+          const list = Array.isArray(resp) ? resp : (Array.isArray(resp?.items) ? resp.items : []);
+          if (list.length && !list[0].closedAt) { console.debug('[OpenShiftRegister] OPEN list hit'); try { await api.users.updateRuntime({ lastShiftId: list[0].id, lastShiftSection: list[0].sectionId, lastShiftBranch: list[0].branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: list[0].sectionId, branchId: list[0].branchId }); } catch {} onShiftOpen(list[0]); return; }
+          // 2) Try current() for selected section
+          if (arr.length) {
+            const sel = selectedSectionId || arr[0].id;
+            try {
+              const cur = await api.shifts.current({ branchId: user.branchId, sectionId: sel });
+              if (cur && !cur.closedAt) { console.debug('[OpenShiftRegister] current(selected section) hit'); try { await api.users.updateRuntime({ lastShiftId: cur.id, lastShiftSection: cur.sectionId, lastShiftBranch: cur.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: cur.sectionId, branchId: cur.branchId }); } catch {} onShiftOpen(cur); return; }
+            } catch {}
+            // 3) Deep probe across all sections
+            const settled = await Promise.allSettled(arr.map(s => api.shifts.current({ branchId: user.branchId, sectionId: s.id })));
+            for (const r of settled) {
+              if (r.status === 'fulfilled' && r.value && !r.value.closedAt) { console.debug('[OpenShiftRegister] current(enumerate) hit'); try { await api.users.updateRuntime({ lastShiftId: r.value.id, lastShiftSection: r.value.sectionId, lastShiftBranch: r.value.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: r.value.sectionId, branchId: r.value.branchId }); } catch {} onShiftOpen(r.value); return; }
+            }
+          }
+        } catch {}
+      } catch {
+        setBranchSections([]);
       }
-    }
-  }, [user.branchId]);
+    };
+    loadSections();
+  }, [user?.branchId]);
 
   const handleOpenRegister = async (e) => {
     e.preventDefault();
@@ -51,34 +113,49 @@ const OpenShiftRegister = ({ onShiftOpen, user }) => {
     }
     
     const selectedSection = branchSections.find(s => s.id === selectedSectionId);
-
-    const newRegister = {
-      id: `reg-${Date.now()}`,
-      openedBy: user.username,
-      openedAt: new Date().toISOString(),
-      openingCash: cashAmount,
-      sectionId: selectedSection.id,
-      sectionName: selectedSection.name,
-      transactions: [],
-      cashSales: 0,
-      cardSales: 0,
-      expectedCash: cashAmount,
-      closedAt: null,
-      closingCash: null,
-      difference: null,
-    };
-
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    localStorage.setItem('loungeShiftRegister', JSON.stringify(newRegister));
-    
-    toast({
-      title: "Shift Register Opened!",
-      description: `Shift started for ${selectedSection.name} with $${cashAmount.toFixed(2)}.`,
-    });
-
-    setIsLoading(false);
-    onShiftOpen(newRegister);
+    try {
+      const shift = await api.shifts.open({ branchId: user.branchId, sectionId: selectedSectionId, openingCash: cashAmount });
+      // attach sectionName for local UI convenience
+      shift.sectionName = selectedSection?.name || shift.sectionName;
+      try { await api.users.updateRuntime({ lastShiftId: shift.id, lastShiftSection: selectedSectionId, lastShiftBranch: user.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: selectedSectionId, branchId: user.branchId }); } catch {}
+      toast({
+        title: "Shift Register Opened!",
+        description: `Shift started for ${selectedSection.name} with $${cashAmount.toFixed(2)}.`,
+      });
+      onShiftOpen(shift);
+    } catch (err) {
+      const msg = String(err?.message || err || '').toLowerCase();
+      if (msg.includes('already open')) {
+        try {
+          // Prefer the canonical current endpoints first
+          try {
+            const curMe = await api.shifts.currentMe();
+            if (curMe && !curMe.closedAt) { onShiftOpen(curMe); return; }
+          } catch {}
+          try {
+            const curAny = await api.shifts.current({});
+            if (curAny && !curAny.closedAt) { onShiftOpen(curAny); return; }
+          } catch {}
+          // Try to retrieve the already-open shift and enter POS immediately
+          const resp = await api.shifts.list({ branchId: user.branchId, status: 'OPEN', limit: 1, offset: 0 });
+          const list = Array.isArray(resp) ? resp : (Array.isArray(resp?.items) ? resp.items : []);
+          if (list.length && !list[0].closedAt) { try { await api.users.updateRuntime({ lastShiftId: list[0].id, lastShiftSection: list[0].sectionId, lastShiftBranch: list[0].branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: list[0].sectionId, branchId: list[0].branchId }); } catch {} onShiftOpen(list[0]); return; }
+          // Fallback to current() on selected section first
+          try {
+            const cur = await api.shifts.current({ branchId: user.branchId, sectionId: selectedSectionId });
+            if (cur && !cur.closedAt) { try { await api.users.updateRuntime({ lastShiftId: cur.id, lastShiftSection: cur.sectionId, lastShiftBranch: cur.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: cur.sectionId, branchId: cur.branchId }); } catch {} onShiftOpen(cur); return; }
+          } catch {}
+          // Deep probe across all branch sections
+          const settled = await Promise.allSettled((branchSections || []).map(s => api.shifts.current({ branchId: user.branchId, sectionId: s.id })));
+          for (const r of settled) {
+            if (r.status === 'fulfilled' && r.value && !r.value.closedAt) { try { await api.users.updateRuntime({ lastShiftId: r.value.id, lastShiftSection: r.value.sectionId, lastShiftBranch: r.value.branchId }); await api.userPrefs.set({ key: 'lastShiftSection', value: r.value.sectionId, branchId: r.value.branchId }); } catch {} onShiftOpen(r.value); return; }
+          }
+        } catch {}
+      }
+      toast({ title: 'Failed to open shift', description: String(err?.message || err), variant: 'destructive' });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (

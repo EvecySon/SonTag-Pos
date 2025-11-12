@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
+import { api } from '@/lib/api';
 import { motion } from 'framer-motion';
 import { Briefcase, Calendar, Percent, Globe, Clock, Hash, Edit, Code, ArrowLeft } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -8,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/use-toast';
+// import { api } from '@/lib/api';
 
 const timezones = [
   "Africa/Lagos", "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney"
@@ -20,7 +22,7 @@ const months = [
   "July", "August", "September", "October", "November", "December"
 ];
 
-const BusinessSettings = ({ onBack }) => {
+const BusinessSettings = ({ onBack, user }) => {
   const [settings, setSettings] = useState({
     businessName: '',
     startDate: '',
@@ -38,17 +40,25 @@ const BusinessSettings = ({ onBack }) => {
     quantityPrecision: 2,
   });
   const [logoPreview, setLogoPreview] = useState('');
+  const [logoFile, setLogoFile] = useState(null);
   const fileInputRef = useRef(null);
+  // moved Override PIN to Settings page
 
   useEffect(() => {
-    const loadedSettings = JSON.parse(localStorage.getItem('businessSettings'));
-    if (loadedSettings) {
-      setSettings(loadedSettings);
-      if (loadedSettings.logo) {
-        setLogoPreview(loadedSettings.logo);
+    (async () => {
+      try {
+        const branchId = user?.branchId;
+        if (!branchId) return;
+        const data = await api.settings.get({ branchId });
+        if (data) {
+          setSettings(prev => ({ ...prev, ...data, logo: data.logoUrl || '' }));
+          if (data.logoUrl) setLogoPreview(data.logoUrl);
+        }
+      } catch {
+        // keep defaults if backend unavailable
       }
-    }
-  }, []);
+    })();
+  }, [user?.branchId]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -65,20 +75,56 @@ const BusinessSettings = ({ onBack }) => {
       const reader = new FileReader();
       reader.onloadend = () => {
         setLogoPreview(reader.result);
-        setSettings(prev => ({ ...prev, logo: reader.result }));
+        // Keep preview only; actual upload happens on submit
+        setLogoFile(file);
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    localStorage.setItem('businessSettings', JSON.stringify(settings));
-    toast({
-      title: '✅ Settings Updated',
-      description: 'Your business settings have been successfully saved.',
-    });
+    try {
+      const branchId = user?.branchId;
+      if (!branchId) { toast({ title: 'Missing branch', description: 'No active branch to save settings to.', variant: 'destructive' }); return; }
+      let logoUrl = settings.logo || '';
+      if (logoFile) {
+        try {
+          const uploaded = await api.settings.uploadLogo(logoFile);
+          logoUrl = uploaded?.url || logoUrl;
+        } catch (errUp) {
+          toast({ title: 'Logo upload failed', description: String(errUp?.message || errUp), variant: 'destructive' });
+        }
+      }
+      await api.settings.update({
+        branchId,
+        businessName: settings.businessName,
+        currency: settings.currency,
+        logoUrl,
+      });
+      // persist to localStorage for immediate UI update
+      try {
+        const s = await api.settings.get({ branchId });
+        const info = {
+          name: s?.businessName || settings.businessName,
+          logoUrl: s?.logoUrl || logoUrl || '',
+          address: s?.address || '',
+          phone: s?.phone || '',
+          email: s?.email || '',
+          currencySymbol: s?.currencySymbol || s?.currency || '₦',
+          currency: s?.currency || settings.currency || 'NGN',
+          theme: s?.theme || undefined,
+        };
+        localStorage.setItem('businessInfo', JSON.stringify(info));
+        try { window.dispatchEvent(new Event('businessInfoUpdated')); } catch {}
+      } catch {}
+      toast({ title: '✅ Settings Updated', description: 'Your business settings have been successfully saved.' });
+    } catch (err) {
+      toast({ title: 'Save failed', description: String(err?.message || err), variant: 'destructive' });
+    }
   };
+
+  // override pin handlers moved
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
@@ -137,6 +183,8 @@ const BusinessSettings = ({ onBack }) => {
           </form>
         </CardContent>
       </Card>
+
+      {/* Override PIN controls moved to main Settings page */}
     </motion.div>
   );
 };

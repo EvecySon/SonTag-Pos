@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
-const Header = ({ user, onLogout, onMenuClick, setActiveTab }) => {
+const Header = ({ user, onLogout, onMenuClick, setActiveTab, onGoToPOS }) => {
   const handleFeatureRequest = () => toast({ title: "🚧 This feature isn't implemented yet—but don't worry! You can request it in your next prompt! 🚀" });
   
   const today = new Date().toLocaleDateString('en-GB');
@@ -32,7 +32,7 @@ const Header = ({ user, onLogout, onMenuClick, setActiveTab }) => {
             <Button variant="outline" size="sm" onClick={() => setActiveTab('calendar')} className="bg-green-500 hover:bg-green-600 text-white border-green-500">
                 <Calendar className="w-4 h-4 mr-2"/>
             </Button>
-            <Button variant="default" size="sm" onClick={() => setActiveTab('pos')} className="bg-green-500 hover:bg-green-600 text-white">
+            <Button variant="default" size="sm" onClick={() => (onGoToPOS ? onGoToPOS() : setActiveTab('pos'))} className="bg-green-500 hover:bg-green-600 text-white">
                 POS
             </Button>
           </div>
@@ -60,7 +60,7 @@ const Header = ({ user, onLogout, onMenuClick, setActiveTab }) => {
                 <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center">
                   <User className="w-5 h-5 text-slate-500 dark:text-slate-300" />
                 </div>
-                <span className="font-semibold text-sm hidden sm:inline">{user.username}</span>
+                <span className="font-semibold text-sm hidden sm:inline">{user?.username || 'User'}</span>
               </motion.button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56 mr-4">
@@ -68,8 +68,12 @@ const Header = ({ user, onLogout, onMenuClick, setActiveTab }) => {
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled>
                 <div className="flex flex-col">
-                  <span className="font-semibold">{user.username}</span>
-                  <span className="text-xs text-muted-foreground">{user.role} at {user.branch}</span>
+                  <span className="font-semibold">{user?.username || 'User'}</span>
+                  {(() => {
+                    const humanRole = user?.appRole?.name || user?.role || '';
+                    const branchName = user?.branch?.name || user?.branch || '';
+                    return <span className="text-xs text-muted-foreground">{humanRole}{(humanRole && branchName) ? ' at ' : ''}{branchName}</span>;
+                  })()}
                 </div>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
@@ -95,3 +99,4 @@ const Header = ({ user, onLogout, onMenuClick, setActiveTab }) => {
 };
 
 export default Header;
+

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Tag, PlusCircle, Edit, Trash2, Percent, DollarSign } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -20,44 +21,75 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
-const DiscountSettings = ({ onBack }) => {
+const DiscountSettings = ({ onBack, user }) => {
   const [discounts, setDiscounts] = useState([]);
   const [isAdding, setIsAdding] = useState(false);
   const [editingDiscount, setEditingDiscount] = useState(null);
 
   useEffect(() => {
-    const loadedDiscounts = JSON.parse(localStorage.getItem('loungeDiscounts')) || [];
-    setDiscounts(loadedDiscounts);
-  }, []);
+    (async () => {
+      try {
+        const branchId = user?.branchId;
+        const res = await api.discounts?.list?.(branchId ? { branchId } : {});
+        const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+        setDiscounts(items);
+      } catch {
+        setDiscounts([]);
+      }
+    })();
+  }, [user?.branchId]);
 
-  const saveDiscounts = (updatedDiscounts) => {
-    setDiscounts(updatedDiscounts);
-    localStorage.setItem('loungeDiscounts', JSON.stringify(updatedDiscounts));
+  const reload = async () => {
+    try {
+      const branchId = user?.branchId;
+      const res = await api.discounts?.list?.(branchId ? { branchId } : {});
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      setDiscounts(items);
+    } catch { setDiscounts([]); }
   };
 
-  const handleAddDiscount = (newDiscount) => {
-    const updatedDiscounts = [...discounts, { ...newDiscount, id: Date.now().toString(), isActive: true }];
-    saveDiscounts(updatedDiscounts);
-    toast({ title: '✅ Discount Added', description: `"${newDiscount.name}" has been created.` });
-    setIsAdding(false);
+  const handleAddDiscount = async (newDiscount) => {
+    try {
+      const branchId = user?.branchId;
+      await api.discounts?.create?.({ ...(branchId ? { branchId } : {}), ...newDiscount });
+      toast({ title: '✅ Discount Added', description: `"${newDiscount.name}" has been created.` });
+      setIsAdding(false);
+      await reload();
+    } catch (e) {
+      toast({ title: 'Create failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
-  const handleUpdateDiscount = (updatedDiscount) => {
-    const updatedDiscounts = discounts.map(d => d.id === updatedDiscount.id ? updatedDiscount : d);
-    saveDiscounts(updatedDiscounts);
-    toast({ title: '✅ Discount Updated', description: `"${updatedDiscount.name}" has been saved.` });
-    setEditingDiscount(null);
+  const handleUpdateDiscount = async (updatedDiscount) => {
+    try {
+      await api.discounts?.update?.(updatedDiscount.id, updatedDiscount);
+      toast({ title: '✅ Discount Updated', description: `"${updatedDiscount.name}" has been saved.` });
+      setEditingDiscount(null);
+      await reload();
+    } catch (e) {
+      toast({ title: 'Update failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
-  const handleDeleteDiscount = (discountId) => {
-    const updatedDiscounts = discounts.filter(d => d.id !== discountId);
-    saveDiscounts(updatedDiscounts);
-    toast({ title: '🗑️ Discount Deleted', description: 'The discount has been removed.' });
+  const handleDeleteDiscount = async (discountId) => {
+    try {
+      await api.discounts?.remove?.(String(discountId));
+      toast({ title: '🗑️ Discount Deleted', description: 'The discount has been removed.' });
+      await reload();
+    } catch (e) {
+      toast({ title: 'Delete failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
-  const toggleDiscountStatus = (discountId) => {
-    const updatedDiscounts = discounts.map(d => d.id === discountId ? { ...d, isActive: !d.isActive } : d);
-    saveDiscounts(updatedDiscounts);
+  const toggleDiscountStatus = async (discountId) => {
+    try {
+      const discount = discounts.find(d => d.id === discountId);
+      if (!discount) return;
+      await api.discounts?.update?.(discountId, { ...discount, isActive: !discount.isActive });
+      await reload();
+    } catch (e) {
+      toast({ title: 'Status update failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
   return (

@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
+import { api } from '@/lib/api';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 
 const BranchForm = ({ branch, onSave, onCancel }) => {
@@ -64,50 +65,50 @@ const Branches = ({ onManageSections }) => {
   const [editingBranch, setEditingBranch] = useState(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('loungeBranches');
-    if (saved) {
-      setBranches(JSON.parse(saved));
-    } else {
-      const initial = [
-        { id: 1, name: 'Main Branch', location: '123 Main St, Downtown', staff: 12, status: 'active', sections: [{id: 'main-bar', name: 'Main Bar', description: 'Primary service area'}] },
-        { id: 2, name: 'Downtown', location: '456 Oak Ave, City Center', staff: 8, status: 'active', sections: [] },
-        { id: 3, name: 'Westside', location: '789 Pine Rd, West District', staff: 10, status: 'active', sections: [] },
-      ];
-      setBranches(initial);
-      localStorage.setItem('loungeBranches', JSON.stringify(initial));
-    }
+    const loadBranches = async () => {
+      try {
+        const list = await api.branches.list();
+        setBranches(Array.isArray(list) ? list : []);
+      } catch {
+        setBranches([]);
+      }
+    };
+    loadBranches();
   }, []);
 
-  const saveBranchesToStorage = (updatedBranches) => {
+  const saveBranchesToState = (updatedBranches) => {
     setBranches(updatedBranches);
-    localStorage.setItem('loungeBranches', JSON.stringify(updatedBranches));
   };
 
-  const handleSaveBranch = (branchData) => {
-    let updatedBranches;
-    if (editingBranch) {
-      updatedBranches = branches.map((b) => (b.id === branchData.id ? { ...b, ...branchData } : b));
-      toast({ title: "Branch Updated!", description: `The "${branchData.name}" branch has been updated.` });
-    } else {
-      const newBranch = {
-        ...branchData,
-        staff: 0,
-        status: 'active',
-        sections: [],
-      };
-      updatedBranches = [...branches, newBranch];
-      toast({ title: "Branch Created!", description: `The "${branchData.name}" branch has been added.` });
+  const handleSaveBranch = async (branchData) => {
+    try {
+      if (editingBranch) {
+        await api.branches.update(branchData.id, { name: branchData.name, location: branchData.location });
+        toast({ title: "Branch Updated!", description: `The "${branchData.name}" branch has been updated.` });
+      } else {
+        await api.branches.create({ name: branchData.name, location: branchData.location });
+        toast({ title: "Branch Created!", description: `The "${branchData.name}" branch has been added.` });
+      }
+      const list = await api.branches.list();
+      setBranches(Array.isArray(list) ? list : []);
+    } catch (e) {
+      toast({ title: 'Branch Save Failed', description: String(e?.message || e), variant: 'destructive' });
+    } finally {
+      setIsFormOpen(false);
+      setEditingBranch(null);
     }
-    saveBranchesToStorage(updatedBranches);
-    setIsFormOpen(false);
-    setEditingBranch(null);
   };
 
-  const handleDeleteBranch = (branchId) => {
+  const handleDeleteBranch = async (branchId) => {
     const branchToDelete = branches.find(b => b.id === branchId);
-    const updatedBranches = branches.filter((b) => b.id !== branchId);
-    saveBranchesToStorage(updatedBranches);
-    toast({ title: "Branch Deleted!", description: `The "${branchToDelete.name}" branch has been removed.` });
+    try {
+      await api.branches.remove(branchId);
+      toast({ title: "Branch Deleted!", description: `The "${branchToDelete?.name || ''}" branch has been removed.` });
+      const list = await api.branches.list();
+      setBranches(Array.isArray(list) ? list : []);
+    } catch (e) {
+      toast({ title: 'Delete Failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
   const openAddForm = () => {

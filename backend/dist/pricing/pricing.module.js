@@ -10,11 +10,13 @@ exports.PricingModule = void 0;
 const common_1 = require("@nestjs/common");
 const pricing_controller_1 = require("./pricing.controller");
 const pricing_service_1 = require("./pricing.service");
+const prisma_module_1 = require("../prisma/prisma.module");
 let PricingModule = class PricingModule {
 };
 exports.PricingModule = PricingModule;
 exports.PricingModule = PricingModule = __decorate([
     (0, common_1.Module)({
+        imports: [prisma_module_1.PrismaModule],
         controllers: [pricing_controller_1.PricingController, pricing_controller_1.PriceListsController],
         providers: [pricing_service_1.PricingService],
         exports: [pricing_service_1.PricingService],

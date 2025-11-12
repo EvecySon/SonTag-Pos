@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,28 +13,45 @@ import { toast } from '@/components/ui/use-toast';
 
 const CategoryManagement = ({ user }) => {
   const [categories, setCategories] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [lastFetchCount, setLastFetchCount] = useState(0);
+  const [lastItems, setLastItems] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState(null);
   const [categoryName, setCategoryName] = useState('');
   const [categoryCode, setCategoryCode] = useState('');
 
   useEffect(() => {
-    const savedCategories = localStorage.getItem('loungeCategories');
-    if (savedCategories) {
-      setCategories(JSON.parse(savedCategories));
-    } else {
-      const initialCategories = [
-        { id: 1, name: 'Hot Drinks', code: 'HD001' },
-        { id: 2, name: 'Cold Drinks', code: 'CD001' },
-        { id: 3, name: 'Sandwiches', code: 'SN001' },
-      ];
-      setCategories(initialCategories);
-      localStorage.setItem('loungeCategories', JSON.stringify(initialCategories));
-    }
-  }, []);
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await api.categories.list({ branchId: user?.branchId || undefined });
+        const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+        const mapped = items.map((c) => ({ id: c.id, name: String(c.name || ''), code: String(c.code || c.slug || '') }));
+        if (!mapped.length) console.warn('[CategoryManagement] initial load empty', { branchId: user.branchId, res });
+        console.debug('[CategoryManagement] initial load', { branchId: user.branchId, count: mapped.length, items: mapped });
+        setLastFetchCount(mapped.length);
+        setLastItems(mapped);
+        setCategories(mapped);
+      } catch (e) {
+        setCategories([]);
+        toast({ title: 'Failed to load categories', description: String(e?.message || e), variant: 'destructive' });
+      } finally { setLoading(false); }
+    })();
+  }, [user?.branchId]);
 
-  const updateLocalStorage = (updatedCategories) => {
-    localStorage.setItem('loungeCategories', JSON.stringify(updatedCategories));
+  const reload = async () => {
+    try {
+      setLoading(true);
+      const res = await api.categories.list({ branchId: user?.branchId || undefined });
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      const mapped = items.map(c => ({ id: c.id, name: String(c.name || ''), code: String(c.code || c.slug || '') }));
+      if (!mapped.length) console.warn('[CategoryManagement] reload empty', { branchId: user.branchId, res });
+      console.debug('[CategoryManagement] reload', { branchId: user.branchId, count: mapped.length, items: mapped });
+      setLastFetchCount(mapped.length);
+      setLastItems(mapped);
+      setCategories(mapped);
+    } catch {} finally { setLoading(false); }
   };
 
   const handleOpenModal = (category = null) => {
@@ -50,37 +68,36 @@ const CategoryManagement = ({ user }) => {
     setCategoryCode('');
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!categoryName || !categoryCode) {
       toast({ title: 'Error', description: 'Category Name and Code are required.', variant: 'destructive' });
       return;
     }
 
-    if (editingCategory) {
-      const updatedCategories = categories.map(c => c.id === editingCategory.id ? { ...c, name: categoryName, code: categoryCode } : c);
-      setCategories(updatedCategories);
-      updateLocalStorage(updatedCategories);
-      toast({ title: 'Success', description: 'Category updated successfully.' });
-    } else {
-      const newCategory = {
-        id: Date.now(),
-        name: categoryName,
-        code: categoryCode,
-      };
-      const updatedCategories = [...categories, newCategory];
-      setCategories(updatedCategories);
-      updateLocalStorage(updatedCategories);
-      toast({ title: 'Success', description: 'Category added successfully.' });
+    try {
+      if (editingCategory) {
+        await api.categories.update?.(editingCategory.id, { name: categoryName, code: categoryCode, branchId: user?.branchId });
+        toast({ title: 'Success', description: 'Category updated successfully.' });
+      } else {
+        await api.categories.create?.({ name: categoryName, code: categoryCode, branchId: user?.branchId });
+        toast({ title: 'Success', description: 'Category added successfully.' });
+      }
+      handleCloseModal();
+      await reload();
+    } catch (err) {
+      toast({ title: 'Save failed', description: String(err?.message || err), variant: 'destructive' });
     }
-    handleCloseModal();
   };
 
-  const handleDelete = (id) => {
-    const updatedCategories = categories.filter(c => c.id !== id);
-    setCategories(updatedCategories);
-    updateLocalStorage(updatedCategories);
-    toast({ title: 'Success', description: 'Category deleted successfully.' });
+  const handleDelete = async (id) => {
+    try {
+      await api.categories.remove?.(String(id));
+      toast({ title: 'Success', description: 'Category deleted successfully.' });
+      await reload();
+    } catch (err) {
+      toast({ title: 'Delete failed', description: String(err?.message || err), variant: 'destructive' });
+    }
   };
 
   return (
@@ -90,11 +107,23 @@ const CategoryManagement = ({ user }) => {
           <CardTitle className="flex items-center gap-2"><Package />Category Management</CardTitle>
           <CardDescription>Manage product categories for your inventory.</CardDescription>
         </div>
-        <Button onClick={() => handleOpenModal()}>
-          <PlusCircle className="mr-2 h-4 w-4" /> Add Category
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={() => handleOpenModal()}>
+            <PlusCircle className="mr-2 h-4 w-4" /> Add Category
+          </Button>
+          <Button variant="secondary" onClick={reload}>Refresh</Button>
+          <Button variant="outline" onClick={() => { setCategories([]); toast({ title: 'Cleared', description: 'All categories cleared.' }); }}>
+            Clear All
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
+        {loading && (
+          <div className="text-sm text-muted-foreground mb-2">Loading categories...</div>
+        )}
+        {!loading && (
+          <div className="text-sm text-muted-foreground mb-2">Categories found: {categories.length} {categories.length === 0 ? `(server: ${lastFetchCount})` : ''}</div>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -146,6 +175,21 @@ const CategoryManagement = ({ user }) => {
             ))}
           </TableBody>
         </Table>
+        {!loading && categories.length === 0 && (
+          <div className="mt-3 p-3 rounded-md bg-blue-50 text-blue-800 border border-blue-200 text-sm">
+            No categories yet. Create categories to organize your products.
+          </div>
+        )}
+        {categories.length === 0 && lastFetchCount > 0 && (
+          <div className="mt-3 p-2 rounded bg-yellow-50 text-sm text-yellow-800 border border-yellow-200">
+            Data fetched but not shown in table. Fallback list:
+            <ul className="list-disc ml-6 mt-1">
+              {lastItems.map(it => (
+                <li key={`fallback-${it.id}`}>{it.name} — {it.code}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </CardContent>
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>

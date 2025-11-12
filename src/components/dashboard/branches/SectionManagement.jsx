@@ -9,22 +9,16 @@ import { toast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { api } from '@/lib/api';
 
-const sectionFunctions = [
-  { id: 'store', name: 'Store', description: 'Purchase storage and inventory' },
-  { id: 'production_bar', name: 'Production (Bar)', description: 'Production & distribution of bar items' },
-  { id: 'production_kitchen', name: 'Production (Kitchen)', description: 'Production & distribution of kitchen items' },
-  { id: 'sales', name: 'Sales Operation', description: 'Direct sales to customers' },
-];
-
-const SectionForm = ({ section, onSave, onCancel }) => {
+const SectionForm = ({ section, onSave, onCancel, sectionFunctions }) => {
   const [name, setName] = useState(section ? section.name : '');
   const [description, setDescription] = useState(section ? section.description : '');
-  const [func, setFunc] = useState(section ? section.function : '');
+  const [sectionFunctionId, setSectionFunctionId] = useState(section ? section.sectionFunctionId || '' : '');
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!name || !func) {
+    if (!name || !sectionFunctionId) {
       toast({
         title: "Validation Error",
         description: "Section name and function are required.",
@@ -36,7 +30,7 @@ const SectionForm = ({ section, onSave, onCancel }) => {
       id: section ? section.id : Date.now(),
       name,
       description,
-      function: func,
+      sectionFunctionId,
     });
   };
 
@@ -53,7 +47,7 @@ const SectionForm = ({ section, onSave, onCancel }) => {
       </div>
       <div className="space-y-2">
         <Label htmlFor="section-function">Section Function</Label>
-        <Select value={func} onValueChange={setFunc}>
+        <Select value={sectionFunctionId} onValueChange={setSectionFunctionId}>
           <SelectTrigger id="section-function">
             <SelectValue placeholder="Select a function" />
           </SelectTrigger>
@@ -83,45 +77,63 @@ const SectionForm = ({ section, onSave, onCancel }) => {
 
 const SectionManagement = ({ branch, onBack }) => {
   const [sections, setSections] = useState([]);
+  const [sectionFunctions, setSectionFunctions] = useState([]);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingSection, setEditingSection] = useState(null);
 
   useEffect(() => {
-    const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-    const currentBranch = allBranches.find(b => b.id === branch.id);
-    if (currentBranch) {
-      setSections(currentBranch.sections || []);
-    }
+    const loadSections = async () => {
+      try {
+        if (!branch?.id) { setSections([]); return; }
+        const rows = await api.sections.list({ branchId: branch.id });
+        setSections(Array.isArray(rows) ? rows : []);
+        const funcs = await api.sectionFunctions.list({ branchId: branch.id });
+        const items = Array.isArray(funcs?.items) ? funcs.items : (Array.isArray(funcs) ? funcs : []);
+        setSectionFunctions(items);
+      } catch {
+        setSections([]);
+      }
+    };
+    loadSections();
   }, [branch.id]);
 
-  const updateBranchSections = (updatedSections) => {
-    const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-    const updatedBranches = allBranches.map(b => 
-      b.id === branch.id ? { ...b, sections: updatedSections } : b
-    );
-    localStorage.setItem('loungeBranches', JSON.stringify(updatedBranches));
-    setSections(updatedSections);
+  const refresh = async () => {
+    try {
+      const rows = await api.sections.list({ branchId: branch.id });
+      setSections(Array.isArray(rows) ? rows : []);
+      const funcs = await api.sectionFunctions.list({ branchId: branch.id });
+      const items = Array.isArray(funcs?.items) ? funcs.items : (Array.isArray(funcs) ? funcs : []);
+      setSectionFunctions(items);
+    } catch { setSections([]); }
   };
 
-  const handleSaveSection = (sectionData) => {
-    let updatedSections;
-    if (editingSection) {
-      updatedSections = sections.map((s) => (s.id === sectionData.id ? sectionData : s));
-      toast({ title: "Section Updated!", description: `The "${sectionData.name}" section has been updated.` });
-    } else {
-      updatedSections = [...sections, { ...sectionData, id: sectionData.name.toLowerCase().replace(/\s+/g, '-') + Date.now() }];
-      toast({ title: "Section Created!", description: `The "${sectionData.name}" section has been added.` });
+  const handleSaveSection = async (sectionData) => {
+    try {
+      if (editingSection) {
+        await api.sections.update(editingSection.id, { name: sectionData.name, description: sectionData.description, sectionFunctionId: sectionData.sectionFunctionId });
+        toast({ title: "Section Updated!", description: `The "${sectionData.name}" section has been updated.` });
+      } else {
+        await api.sections.create({ branchId: branch.id, name: sectionData.name, description: sectionData.description, sectionFunctionId: sectionData.sectionFunctionId });
+        toast({ title: "Section Created!", description: `The "${sectionData.name}" section has been added.` });
+      }
+      await refresh();
+    } catch (e) {
+      toast({ title: 'Section Save Failed', description: String(e?.message || e), variant: 'destructive' });
+    } finally {
+      setIsFormOpen(false);
+      setEditingSection(null);
     }
-    updateBranchSections(updatedSections);
-    setIsFormOpen(false);
-    setEditingSection(null);
   };
 
-  const handleDeleteSection = (sectionId) => {
+  const handleDeleteSection = async (sectionId) => {
     const sectionToDelete = sections.find(s => s.id === sectionId);
-    const updatedSections = sections.filter((s) => s.id !== sectionId);
-    updateBranchSections(updatedSections);
-    toast({ title: "Section Deleted!", description: `The "${sectionToDelete.name}" section has been removed.` });
+    try {
+      await api.sections.remove(sectionId);
+      toast({ title: "Section Deleted!", description: `The "${sectionToDelete?.name || ''}" section has been removed.` });
+      await refresh();
+    } catch (e) {
+      toast({ title: 'Delete Failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
   const openAddForm = () => {
@@ -171,7 +183,7 @@ const SectionManagement = ({ branch, onBack }) => {
                       <Box className="w-5 h-5 text-primary" />
                       <div>
                         <p className="font-semibold">{section.name}</p>
-                        <p className="text-sm text-muted-foreground">{sectionFunctions.find(f => f.id === section.function)?.name || 'No function'}</p>
+                        <p className="text-sm text-muted-foreground">{sectionFunctions.find(f => f.id === section.sectionFunctionId)?.name || (section.function || 'No function')}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -214,7 +226,7 @@ const SectionManagement = ({ branch, onBack }) => {
             {editingSection ? `Update the details for your section in ${branch.name}.` : `Create a new section for the ${branch.name} branch.`}
           </DialogDescription>
         </DialogHeader>
-        <SectionForm section={editingSection} onSave={handleSaveSection} onCancel={() => setIsFormOpen(false)} />
+        <SectionForm section={editingSection} onSave={handleSaveSection} onCancel={() => setIsFormOpen(false)} sectionFunctions={sectionFunctions} />
       </DialogContent>
     </Dialog>
   );

@@ -13,22 +13,50 @@ exports.JwtStrategy = void 0;
 const common_1 = require("@nestjs/common");
 const passport_1 = require("@nestjs/passport");
 const passport_jwt_1 = require("passport-jwt");
-const config_1 = require("@nestjs/config");
+const prisma_service_1 = require("../prisma/prisma.service");
+function cookieOrAuthExtractor(req) {
+    const auth = req.headers['authorization'];
+    if (auth && auth.startsWith('Bearer '))
+        return auth.slice(7);
+    const cookie = req.headers['cookie'];
+    if (cookie) {
+        const match = cookie.match(/access_token=([^;]+)/);
+        if (match)
+            return decodeURIComponent(match[1]);
+    }
+    return null;
+}
 let JwtStrategy = class JwtStrategy extends (0, passport_1.PassportStrategy)(passport_jwt_1.Strategy) {
-    constructor(config) {
+    prisma;
+    constructor(prisma) {
         super({
-            jwtFromRequest: passport_jwt_1.ExtractJwt.fromAuthHeaderAsBearerToken(),
+            jwtFromRequest: passport_jwt_1.ExtractJwt.fromExtractors([cookieOrAuthExtractor]),
             ignoreExpiration: false,
-            secretOrKey: config.get('JWT_SECRET') || 'change-me',
+            secretOrKey: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'devsecret',
         });
+        this.prisma = prisma;
     }
     async validate(payload) {
-        return { userId: payload.sub, role: payload.role, branchId: payload.branchId ?? null };
+        try {
+            const user = await this.prisma.user.findUnique({
+                where: { id: String(payload.sub) },
+                select: { id: true, username: true, role: true, branchId: true },
+            });
+            let branchId = user?.branchId || null;
+            if (!branchId) {
+                const firstBranch = await this.prisma.branch.findFirst({ select: { id: true }, orderBy: { createdAt: 'asc' } });
+                branchId = firstBranch?.id || null;
+            }
+            return { userId: payload.sub, username: payload.username, role: payload.role, branchId };
+        }
+        catch {
+            return { userId: payload.sub, username: payload.username, role: payload.role };
+        }
     }
 };
 exports.JwtStrategy = JwtStrategy;
 exports.JwtStrategy = JwtStrategy = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [config_1.ConfigService])
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService])
 ], JwtStrategy);
 //# sourceMappingURL=jwt.strategy.js.map

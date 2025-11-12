@@ -11,7 +11,7 @@ const timezones = ["Africa/Lagos", "America/New_York", "Europe/London", "Asia/To
 const currencies = ["NGN", "USD", "EUR", "GBP"];
 const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-const RegisterPage = ({ onRegister, onNavigateToLogin }) => {
+const RegisterPage = ({ onRegister, onNavigateToLogin, onRegistered }) => {
   const [step, setStep] = useState(1);
   const [businessData, setBusinessData] = useState({
     businessName: '', startDate: '', currency: '', logo: null, website: '',
@@ -91,13 +91,15 @@ const RegisterPage = ({ onRegister, onNavigateToLogin }) => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validateStep3()) return;
-    
     toast({ title: "Registration Successful!", description: "Your business is being set up." });
-    // In a real app, you would pass all data: businessData, settingsData, ownerData
-    onRegister(businessData, ownerData);
+    try {
+      await Promise.resolve(onRegister && onRegister(businessData, ownerData));
+    } finally {
+      if (onRegistered) onRegistered();
+    }
   };
   
   const steps = [

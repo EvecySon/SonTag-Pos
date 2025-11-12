@@ -89,7 +89,7 @@
 }
 
 .bg-pos-background {
-  background-color: var(--pos-background);
+  background-color: hsl(var(--pos-background));
 }
 
 .gradient-text {

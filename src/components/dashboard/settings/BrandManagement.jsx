@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,27 +13,33 @@ import { toast } from '@/components/ui/use-toast';
 
 const BrandManagement = ({ user }) => {
   const [brands, setBrands] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingBrand, setEditingBrand] = useState(null);
   const [brandName, setBrandName] = useState('');
 
   useEffect(() => {
-    const savedBrands = localStorage.getItem('loungeBrands');
-    if (savedBrands) {
-      setBrands(JSON.parse(savedBrands));
-    } else {
-      const initialBrands = [
-        { id: 1, name: 'Lavazza' },
-        { id: 2, name: 'Coca-Cola' },
-        { id: 3, name: 'Generic' },
-      ];
-      setBrands(initialBrands);
-      localStorage.setItem('loungeBrands', JSON.stringify(initialBrands));
-    }
-  }, []);
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await api.brands?.list?.({ branchId: user?.branchId || undefined });
+        const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+        const mapped = (items || []).map(b => ({ id: b.id, name: b.name }));
+        setBrands(mapped);
+        return;
+      } catch {}
+      setBrands([]);
+      setLoading(false);
+    })();
+  }, [user?.branchId]);
 
-  const updateLocalStorage = (updatedBrands) => {
-    localStorage.setItem('loungeBrands', JSON.stringify(updatedBrands));
+  const reload = async () => {
+    try {
+      setLoading(true);
+      const res = await api.brands?.list?.({ branchId: user?.branchId || undefined });
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      setBrands((items || []).map(b => ({ id: b.id, name: b.name })));
+    } catch { setBrands([]); } finally { setLoading(false); }
   };
 
   const handleOpenModal = (brand = null) => {
@@ -47,36 +54,36 @@ const BrandManagement = ({ user }) => {
     setBrandName('');
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!brandName) {
       toast({ title: 'Error', description: 'Brand Name is required.', variant: 'destructive' });
       return;
     }
-
-    if (editingBrand) {
-      const updatedBrands = brands.map(b => b.id === editingBrand.id ? { ...b, name: brandName } : b);
-      setBrands(updatedBrands);
-      updateLocalStorage(updatedBrands);
-      toast({ title: 'Success', description: 'Brand updated successfully.' });
-    } else {
-      const newBrand = {
-        id: Date.now(),
-        name: brandName,
-      };
-      const updatedBrands = [...brands, newBrand];
-      setBrands(updatedBrands);
-      updateLocalStorage(updatedBrands);
-      toast({ title: 'Success', description: 'Brand added successfully.' });
+    try {
+      if (editingBrand) {
+        await api.brands?.update?.(editingBrand.id, { name: brandName, branchId: user?.branchId });
+        toast({ title: 'Success', description: 'Brand updated successfully.' });
+      } else {
+        await api.brands?.create?.({ name: brandName, branchId: user?.branchId });
+        toast({ title: 'Success', description: 'Brand added successfully.' });
+      }
+      await reload();
+    } catch (err) {
+      toast({ title: 'Save failed', description: String(err?.message || err), variant: 'destructive' });
+    } finally {
+      handleCloseModal();
     }
-    handleCloseModal();
   };
 
-  const handleDelete = (id) => {
-    const updatedBrands = brands.filter(b => b.id !== id);
-    setBrands(updatedBrands);
-    updateLocalStorage(updatedBrands);
-    toast({ title: 'Success', description: 'Brand deleted successfully.' });
+  const handleDelete = async (id) => {
+    try {
+      await api.brands?.remove?.(String(id));
+      toast({ title: 'Success', description: 'Brand deleted successfully.' });
+      await reload();
+    } catch (err) {
+      toast({ title: 'Delete failed', description: String(err?.message || err), variant: 'destructive' });
+    }
   };
 
   return (
@@ -86,11 +93,17 @@ const BrandManagement = ({ user }) => {
           <CardTitle className="flex items-center gap-2"><Award />Brand Management</CardTitle>
           <CardDescription>Manage product brands for your inventory.</CardDescription>
         </div>
-        <Button onClick={() => handleOpenModal()}>
-          <PlusCircle className="mr-2 h-4 w-4" /> Add Brand
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={() => handleOpenModal()}>
+            <PlusCircle className="mr-2 h-4 w-4" /> Add Brand
+          </Button>
+          <Button variant="outline" onClick={async () => { await reload(); toast({ title: 'Refreshed', description: 'Brand list reloaded from server.' }); }}>
+            Refresh
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
+        {loading && <div className="text-sm text-muted-foreground mb-2">Loading brands...</div>}
         <Table>
           <TableHeader>
             <TableRow>
@@ -140,6 +153,11 @@ const BrandManagement = ({ user }) => {
             ))}
           </TableBody>
         </Table>
+        {!loading && brands.length === 0 && (
+          <div className="mt-3 p-3 rounded-md bg-blue-50 text-blue-800 border border-blue-200 text-sm">
+            No brands yet. Create brands to better classify products.
+          </div>
+        )}
       </CardContent>
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>

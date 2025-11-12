@@ -1,15 +1,4 @@
 import { PricingService } from './pricing.service';
-declare class CreatePriceListDto {
-    name: string;
-    branchId: string;
-    sectionId?: string;
-    active?: boolean;
-}
-declare class UpsertPriceEntryDto {
-    priceListId: string;
-    productId: string;
-    price: string;
-}
 export declare class PricingController {
     private readonly pricing;
     constructor(pricing: PricingService);
@@ -18,21 +7,34 @@ export declare class PricingController {
 export declare class PriceListsController {
     private readonly pricing;
     constructor(pricing: PricingService);
-    create(dto: CreatePriceListDto): Promise<{
-        id: string;
+    create(body: {
         name: string;
-        active: boolean;
+        branchId: string;
+        sectionId?: string;
+        active?: boolean;
+    }, req: any): Promise<{
+        branchId: string;
+        id: string;
         createdAt: Date;
         updatedAt: Date;
-        branchId: string;
+        name: string;
         sectionId: string | null;
+        active: boolean;
     }>;
-    upsertEntry(dto: UpsertPriceEntryDto): Promise<{
-        id: string;
-        createdAt: Date;
+    upsertEntries(body: {
+        priceListId?: string;
+        branchId: string;
+        sectionId?: string;
+        entries: Array<{
+            productId: string;
+            price: string;
+        }>;
+    }, req: any): Promise<{
         priceListId: string;
-        productId: string;
-        price: import("@prisma/client/runtime/library").Decimal;
+        entries: any[];
+    }>;
+    remove(id: string): Promise<{
+        ok: boolean;
+        id: string;
     }>;
 }
-export {};

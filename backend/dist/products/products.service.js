@@ -17,43 +17,154 @@ let ProductsService = class ProductsService {
     constructor(prisma) {
         this.prisma = prisma;
     }
-    async list(branchId) {
+    async list(branchId, includeArchived) {
         return this.prisma.product.findMany({
-            where: branchId ? { branchId } : undefined,
+            where: {
+                ...(branchId ? { branchId } : {}),
+                ...(includeArchived ? {} : { archived: false }),
+            },
             orderBy: { name: 'asc' },
         });
     }
     async create(dto, role) {
-        if (role !== 'ADMIN' && role !== 'MANAGER')
-            throw new common_1.ForbiddenException('Insufficient role');
-        const product = await this.prisma.product.create({ data: {
-                name: dto.name,
-                sku: dto.sku,
-                category: dto.category,
-                price: dto.price,
-                taxRate: dto.taxRate,
-                branchId: dto.branchId,
-            } });
-        await this.prisma.inventory.upsert({
-            where: { productId_branchId: { productId: product.id, branchId: dto.branchId } },
-            create: { productId: product.id, branchId: dto.branchId, qtyOnHand: 0 },
-            update: {},
-        });
+        let branchId = dto?.branchId;
+        if (!branchId) {
+            const first = await this.prisma.branch.findFirst({ select: { id: true }, orderBy: { createdAt: 'asc' } });
+            branchId = first?.id;
+        }
+        if (!branchId)
+            throw new common_1.BadRequestException('branchId is required');
+        let productTypeId = dto.productTypeId;
+        if (!productTypeId && dto.productTypeName) {
+            const byName = await this.prisma.productType.findFirst({ where: { branchId, name: dto.productTypeName } });
+            if (!byName)
+                throw new common_1.BadRequestException('Product type not found');
+            productTypeId = byName.id;
+        }
+        if (productTypeId) {
+            const pt = await this.prisma.productType.findUnique({ where: { id: productTypeId } });
+            if (!pt)
+                throw new common_1.BadRequestException('Product type not found');
+            if (pt.branchId !== branchId)
+                throw new common_1.BadRequestException('Product type belongs to a different branch');
+        }
+        let product;
+        try {
+            product = await this.prisma.$transaction(async (tx) => {
+                const b = await tx.branch.update({ where: { id: branchId }, data: { nextSkuSeq: { increment: 1 } }, select: { nextSkuSeq: true } });
+                const seq = Number(b.nextSkuSeq || 0);
+                const sku = String(seq).padStart(3, '0');
+                const created = await tx.product.create({
+                    data: {
+                        name: dto.name,
+                        sku,
+                        category: dto.category,
+                        subCategory: dto.subCategory,
+                        price: dto.price,
+                        taxRate: dto.taxRate,
+                        branchId: branchId,
+                        productTypeId: productTypeId ?? null,
+                    },
+                });
+                const qtyInitialRaw = dto.initialQty !== undefined && dto.initialQty !== null ? String(dto.initialQty) : undefined;
+                const qtyInitial = qtyInitialRaw !== undefined ? Math.max(0, Math.floor(Number(qtyInitialRaw))) : 0;
+                await tx.inventory.upsert({
+                    where: { productId_branchId: { productId: created.id, branchId: branchId } },
+                    create: { productId: created.id, branchId: branchId, qtyOnHand: 0 },
+                    update: {},
+                });
+                if (dto.initialSectionId && qtyInitial > 0) {
+                    const sec = await tx.section.findUnique({ where: { id: dto.initialSectionId } });
+                    if (!sec)
+                        throw new common_1.BadRequestException('Section not found');
+                    if (sec.branchId !== branchId)
+                        throw new common_1.BadRequestException('Section belongs to a different branch');
+                    const invSec = await tx.sectionInventory.upsert({
+                        where: { productId_sectionId: { productId: created.id, sectionId: dto.initialSectionId } },
+                        update: {},
+                        create: { productId: created.id, sectionId: dto.initialSectionId, qtyOnHand: 0 },
+                    });
+                    const nextQty = Number(invSec.qtyOnHand || 0) + qtyInitial;
+                    await tx.sectionInventory.update({
+                        where: { productId_sectionId: { productId: created.id, sectionId: dto.initialSectionId } },
+                        data: { qtyOnHand: nextQty },
+                    });
+                    await tx.stockMovement.create({
+                        data: {
+                            productId: created.id,
+                            branchId: branchId,
+                            sectionFrom: null,
+                            sectionTo: dto.initialSectionId,
+                            delta: qtyInitial,
+                            reason: 'ADJUST',
+                            referenceId: `ADJ|${invSec.qtyOnHand}|${nextQty}|||PRODUCT_CREATE_INITIAL`,
+                        },
+                    });
+                }
+                return created;
+            });
+        }
+        catch (e) {
+            if (e?.code === 'P2002')
+                throw new common_1.BadRequestException('A product with this SKU already exists.');
+            throw e;
+        }
         return product;
     }
     async update(id, dto, role) {
-        if (role !== 'ADMIN' && role !== 'MANAGER')
-            throw new common_1.ForbiddenException('Insufficient role');
         const exist = await this.prisma.product.findUnique({ where: { id } });
         if (!exist)
             throw new common_1.NotFoundException('Product not found');
-        return this.prisma.product.update({ where: { id }, data: {
+        let productTypeId = undefined;
+        if (dto.productTypeId !== undefined || dto.productTypeName !== undefined) {
+            if (dto.productTypeId === null || dto.productTypeName === null || dto.productTypeId === '' || dto.productTypeName === '') {
+                productTypeId = null;
+            }
+            else if (dto.productTypeId) {
+                const pt = await this.prisma.productType.findUnique({ where: { id: dto.productTypeId } });
+                if (!pt)
+                    throw new common_1.BadRequestException('Product type not found');
+                if (pt.branchId !== exist.branchId)
+                    throw new common_1.BadRequestException('Product type belongs to a different branch');
+                productTypeId = pt.id;
+            }
+            else if (dto.productTypeName) {
+                const ptByName = await this.prisma.productType.findFirst({ where: { branchId: exist.branchId, name: dto.productTypeName } });
+                if (!ptByName)
+                    throw new common_1.BadRequestException('Product type not found');
+                productTypeId = ptByName.id;
+            }
+        }
+        return this.prisma.product.update({
+            where: { id },
+            data: {
                 name: dto.name,
-                sku: dto.sku,
                 category: dto.category,
+                subCategory: dto.subCategory,
                 price: dto.price,
                 taxRate: dto.taxRate,
-            } });
+                ...(productTypeId !== undefined ? { productTypeId } : {}),
+            },
+        });
+    }
+    async remove(id, role) {
+        const exist = await this.prisma.product.findUnique({ where: { id } });
+        if (!exist)
+            throw new common_1.NotFoundException('Product not found');
+        const salesCount = await this.prisma.orderItem.count({ where: { productId: id } });
+        if (salesCount > 0) {
+            return this.prisma.product.update({ where: { id }, data: { archived: true } });
+        }
+        try {
+            await this.prisma.inventory.deleteMany({ where: { productId: id } });
+            await this.prisma.sectionInventory.deleteMany({ where: { productId: id } }).catch(() => { });
+            await this.prisma.orderItem.deleteMany({ where: { productId: id } }).catch(() => { });
+            await this.prisma.priceEntry.deleteMany({ where: { productId: id } }).catch(() => { });
+            return await this.prisma.product.delete({ where: { id } });
+        }
+        catch (e) {
+            return this.prisma.product.update({ where: { id }, data: { archived: true } });
+        }
     }
 };
 exports.ProductsService = ProductsService;

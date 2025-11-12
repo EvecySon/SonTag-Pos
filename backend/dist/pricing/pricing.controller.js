@@ -15,18 +15,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.PriceListsController = exports.PricingController = void 0;
 const common_1 = require("@nestjs/common");
 const jwt_auth_guard_1 = require("../auth/jwt-auth.guard");
+const permissions_guard_1 = require("../auth/permissions.guard");
+const permissions_decorator_1 = require("../auth/permissions.decorator");
 const pricing_service_1 = require("./pricing.service");
-class CreatePriceListDto {
-    name;
-    branchId;
-    sectionId;
-    active;
-}
-class UpsertPriceEntryDto {
-    priceListId;
-    productId;
-    price;
-}
 let PricingController = class PricingController {
     pricing;
     constructor(pricing) {
@@ -55,28 +46,53 @@ let PriceListsController = class PriceListsController {
     constructor(pricing) {
         this.pricing = pricing;
     }
-    async create(dto) {
-        return this.pricing.createPriceList(dto);
+    async create(body, req) {
+        return this.pricing.createPriceList(body, req.user?.role);
     }
-    async upsertEntry(dto) {
-        return this.pricing.upsertPriceEntry(dto);
+    async upsertEntries(body, req) {
+        let priceListId = body.priceListId;
+        if (!priceListId) {
+            const pl = await this.pricing.ensureActivePriceList(body.branchId, body.sectionId, req.user?.role);
+            priceListId = pl.id;
+        }
+        const results = [];
+        for (const e of (body.entries || [])) {
+            results.push(await this.pricing.upsertPriceEntry({ priceListId, productId: e.productId, price: e.price }, req.user?.role));
+        }
+        return { priceListId, entries: results };
+    }
+    async remove(id) {
+        return { ok: true, id };
     }
 };
 exports.PriceListsController = PriceListsController;
 __decorate([
+    (0, common_1.UseGuards)(permissions_guard_1.PermissionsGuard),
     (0, common_1.Post)(),
+    (0, permissions_decorator_1.Permissions)('section_pricing'),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [CreatePriceListDto]),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", Promise)
 ], PriceListsController.prototype, "create", null);
 __decorate([
+    (0, common_1.UseGuards)(permissions_guard_1.PermissionsGuard),
     (0, common_1.Post)('entries'),
+    (0, permissions_decorator_1.Permissions)('section_pricing'),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [UpsertPriceEntryDto]),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", Promise)
-], PriceListsController.prototype, "upsertEntry", null);
+], PriceListsController.prototype, "upsertEntries", null);
+__decorate([
+    (0, common_1.Delete)(':id'),
+    __param(0, (0, common_1.Param)('id')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], PriceListsController.prototype, "remove", null);
 exports.PriceListsController = PriceListsController = __decorate([
     (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard),
     (0, common_1.Controller)('price-lists'),

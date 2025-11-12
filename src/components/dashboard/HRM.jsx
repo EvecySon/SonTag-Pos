@@ -9,6 +9,7 @@ import { toast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { api } from '@/lib/api';
 
 const HRM = ({ user }) => {
     const [activeModule, setActiveModule] = useState(null);
@@ -23,35 +24,45 @@ const HRM = ({ user }) => {
         setOverridePin(savedSettings.overridePin || '');
         setGraceWindow(savedSettings.graceWindow || 5);
       }
-      
+
       const allRoles = JSON.parse(localStorage.getItem('loungeRoles') || '[]');
       const currentUserRole = allRoles.find(r => r.name === user.role);
       if (currentUserRole) {
         setUserPermissions(currentUserRole.permissions);
       }
-    }, [user.role]);
 
-    const handleSavePinSettings = () => {
+      // Load override PIN status from backend for this branch
+      (async () => {
+        try {
+          const branchId = user?.branchId || user?.branch?.id;
+          if (!branchId) return;
+          const s = await api.hrm.overridePin.get({ branchId });
+          if (s && typeof s.graceSeconds === 'number') setGraceWindow(Number(s.graceSeconds));
+        } catch {}
+      })();
+    }, [user.role, user?.branchId]);
+
+    const handleSavePinSettings = async () => {
       const settingsToSave = JSON.parse(localStorage.getItem('loungeSettings')) || {};
-      const updatedSettings = {
-        ...settingsToSave,
-        overridePin,
-        graceWindow,
-      };
+      const updatedSettings = { ...settingsToSave, overridePin, graceWindow };
       localStorage.setItem('loungeSettings', JSON.stringify(updatedSettings));
-      toast({
-        title: `✅ Override PIN Settings Saved`,
-        description: "Your settings have been saved locally.",
-      });
+      try {
+        const branchId = user?.branchId || user?.branch?.id;
+        if (branchId) await api.hrm.overridePin.set({ branchId, pin: overridePin, graceSeconds: Number(graceWindow) || 5 });
+        toast({ title: `✅ Override PIN Settings Saved`, description: "Saved to server." });
+      } catch (e) {
+        toast({ title: 'Failed to save PIN', description: String(e?.message || e), variant: 'destructive' });
+      }
     };
 
     const generateRandomPin = () => {
       const pin = Math.floor(1000 + Math.random() * 9000).toString();
       setOverridePin(pin);
-      toast({ title: "New PIN Generated", description: "Don't forget to save your settings." });
+      toast({ title: "New PIN Generated", description: "Click Save to apply." });
     };
 
     const hrmModules = [
+        { id: 'employees', title: 'Employees', icon: UserPlus, description: 'Manage employee profiles and override PINs.' },
         { id: 'shift', title: 'Shift Management', icon: Clock, description: 'Assign and manage staff shifts.' },
         { id: 'payroll', title: 'Payroll', icon: Wallet, description: 'Manage salaries, deductions, and pay slips.' },
         { id: 'leave', title: 'Leave Management', icon: Calendar, description: 'Track employee leave requests and balances.' },
@@ -153,6 +164,7 @@ const HRM = ({ user }) => {
 const ModuleView = ({ module, onBack }) => {
     const renderModuleContent = () => {
         switch (module.id) {
+            case 'employees': return <EmployeesManagement />;
             case 'shift': return <ShiftManagement />;
             case 'payroll': return <PayrollManagement />;
             case 'leave': return <LeaveManagement />;
@@ -183,86 +195,371 @@ const ModuleView = ({ module, onBack }) => {
     );
 };
 
+// Employees management (profiles + PIN) — backend-powered
+const EmployeesManagement = () => {
+  const [profiles, setProfiles] = useState([]);
+  const [allUsers, setAllUsers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [form, setForm] = useState({ userId: '', jobTitle: '', hourlyRate: '' });
+  const [pinInput, setPinInput] = useState({});
+
+  const load = async () => {
+    const s = (() => {
+      try { return JSON.parse(localStorage.getItem('loungeUser') || 'null'); } catch { return null; }
+    })();
+    const branchId = s?.branchId || s?.branch?.id || '';
+    if (!branchId) return;
+    try {
+      setLoading(true);
+      const [plist, ulist] = await Promise.all([
+        api.hrm.employees.list({ branchId }),
+        api.users.list({ branchId }),
+      ]);
+      setProfiles(plist || []);
+      setAllUsers(ulist || []);
+    } catch (e) {
+      toast({ title: 'Failed to load employees', description: String(e?.message || e), variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+  useEffect(() => { if (isAssignOpen) load(); }, [isAssignOpen]);
+
+  const createProfile = async () => {
+    if (!form.userId) {
+      toast({ title: 'Select a user', variant: 'destructive' });
+      return;
+    }
+    try {
+      await api.hrm.employees.create({
+        userId: form.userId,
+        branchId,
+        jobTitle: form.jobTitle || undefined,
+        hourlyRate: form.hourlyRate ? Number(form.hourlyRate) : undefined,
+      });
+      setIsCreateOpen(false);
+      setForm({ userId: '', jobTitle: '', hourlyRate: '' });
+      await load();
+      toast({ title: 'Employee profile created' });
+    } catch (e) {
+      toast({ title: 'Create failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const setPin = async (id, pin) => {
+    try {
+      await api.hrm.employees.setPin(id, pin || '');
+      setPinInput(prev => ({ ...prev, [id]: '' }));
+      toast({ title: pin ? 'PIN set' : 'PIN cleared' });
+    } catch (e) {
+      toast({ title: 'PIN update failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-xl font-bold">Employees</h3>
+          <p className="text-sm text-gray-500">Manage employee profiles</p>
+        </div>
+        <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+          <DialogTrigger asChild>
+            <Button><UserPlus className="w-4 h-4 mr-2"/>New Profile</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create Employee Profile</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label>User</Label>
+                <Select value={form.userId} onValueChange={(v) => setForm(prev => ({ ...prev, userId: v }))}>
+                  <SelectTrigger><SelectValue placeholder="Select user" /></SelectTrigger>
+                  <SelectContent>
+                    {allUsers.map(u => <SelectItem key={u.id} value={u.id}>{u.username} ({u.email})</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Job Title</Label>
+                <Input value={form.jobTitle} onChange={e => setForm(prev => ({ ...prev, jobTitle: e.target.value }))} placeholder="e.g., Barista" />
+              </div>
+              <div className="space-y-2">
+                <Label>Hourly Rate</Label>
+                <Input type="number" value={form.hourlyRate} onChange={e => setForm(prev => ({ ...prev, hourlyRate: e.target.value }))} placeholder="e.g., 8.5" />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setIsCreateOpen(false)}>Cancel</Button>
+              <Button onClick={createProfile}>Create</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Profiles</CardTitle>
+          <CardDescription>{loading ? 'Loading…' : `${profiles.length} profiles`}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Staff</TableHead>
+                <TableHead>Job Title</TableHead>
+                <TableHead>Hourly</TableHead>
+                <TableHead>Override PIN</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(profiles || []).map(p => (
+                <TableRow key={p.id}>
+                  <TableCell>
+                    <div className="font-semibold">{p.user?.username}</div>
+                    <div className="text-xs text-gray-500">{p.user?.email}</div>
+                  </TableCell>
+                  <TableCell>{p.jobTitle || '—'}</TableCell>
+                  <TableCell>{p.hourlyRate ?? '—'}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <Input className="w-[120px]" type="password" placeholder="Set PIN" value={pinInput[p.id] || ''} onChange={e => setPinInput(prev => ({ ...prev, [p.id]: e.target.value }))} />
+                      <Button size="sm" onClick={() => setPin(p.id, pinInput[p.id])}>Set</Button>
+                      <Button size="sm" variant="outline" onClick={() => setPin(p.id, '')}>Clear</Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
 const ShiftManagement = () => {
-    const [staff, setStaff] = useState([]);
-    const [shifts, setShifts] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [isAssignOpen, setIsAssignOpen] = useState(false);
+  const [form, setForm] = useState({ userId: '', start: '', end: '', note: '' });
 
-    useEffect(() => {
-        const savedStaff = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
-        setStaff(savedStaff);
-        const savedShifts = JSON.parse(localStorage.getItem('loungeShifts') || '["Morning", "Evening", "Night"]');
-        setShifts(savedShifts);
-    }, []);
+  const load = async () => {
+    const s = (() => { try { return JSON.parse(localStorage.getItem('loungeUser') || 'null'); } catch { return null; } })();
+    const branchId = s?.branchId || s?.branch?.id || '';
+    if (!branchId) return;
+    try {
+      setLoading(true);
+      const [u, a] = await Promise.all([
+        api.users.list({ branchId, includeArchived: false }),
+        api.hrm.shifts.list({ branchId }),
+      ]);
+      setUsers(u || []);
+      setAssignments(a || []);
+    } catch (e) {
+      try {
+        const fallback = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
+        setUsers(fallback);
+      } catch {}
+      toast({ title: 'Failed to load shifts', description: String(e?.message || e), variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const handleShiftChange = (staffId, newShift) => {
-        const updatedStaff = staff.map(s => s.id === staffId ? { ...s, shift: newShift } : s);
-        setStaff(updatedStaff);
-        localStorage.setItem('loungeUsers', JSON.stringify(updatedStaff));
-        toast({ title: "Shift Updated", description: `Shift for ${updatedStaff.find(s => s.id === staffId).username} has been updated.` });
-    };
+  useEffect(() => { load(); }, []);
+  useEffect(() => { if (isAssignOpen) load(); }, [isAssignOpen]);
 
-    return (
-        <Card>
-            <CardHeader>
-                <CardTitle>Staff Shifts</CardTitle>
-                <CardDescription>Assign shifts to your staff members.</CardDescription>
-            </CardHeader>
-            <CardContent>
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead>Staff Name</TableHead>
-                            <TableHead>Role</TableHead>
-                            <TableHead>Current Shift</TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        {staff.map(s => (
-                            <TableRow key={s.id}>
-                                <TableCell>{s.username}</TableCell>
-                                <TableCell>{s.role}</TableCell>
-                                <TableCell>
-                                    <Select value={s.shift || ''} onValueChange={(value) => handleShiftChange(s.id, value)}>
-                                        <SelectTrigger className="w-[180px]">
-                                            <SelectValue placeholder="Assign Shift" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {shifts.map(shift => <SelectItem key={shift} value={shift}>{shift}</SelectItem>)}
-                                        </SelectContent>
-                                    </Select>
-                                </TableCell>
-                            </TableRow>
-                        ))}
-                    </TableBody>
-                </Table>
-            </CardContent>
-        </Card>
-    );
+  const assign = async () => {
+    if (!form.userId || !form.start) {
+      toast({ title: 'User and start time required', variant: 'destructive' });
+      return;
+    }
+    try {
+      await api.hrm.shifts.assign({
+        userId: form.userId,
+        branchId: (() => { try { const s = JSON.parse(localStorage.getItem('loungeUser') || 'null'); return s?.branchId || s?.branch?.id || ''; } catch { return ''; } })(),
+        start: form.start,
+        end: form.end || undefined,
+        note: form.note || undefined,
+      });
+      setIsAssignOpen(false);
+      setForm({ userId: '', start: '', end: '', note: '' });
+      await load();
+      toast({ title: 'Shift assigned' });
+    } catch (e) {
+      toast({ title: 'Assign failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const update = async (id, patch) => {
+    try {
+      await api.hrm.shifts.update(id, patch);
+      await load();
+      toast({ title: 'Shift updated' });
+    } catch (e) {
+      toast({ title: 'Update failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const remove = async (id) => {
+    try {
+      await api.hrm.shifts.remove(id);
+      await load();
+      toast({ title: 'Shift removed' });
+    } catch (e) {
+      toast({ title: 'Delete failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  return (
+    <>
+      <Card className="mb-4">
+        <CardHeader className="flex-row items-center justify-between">
+          <div>
+            <CardTitle>Shift Assignments</CardTitle>
+            <CardDescription>Assign and manage staff shifts.</CardDescription>
+          </div>
+          <Dialog open={isAssignOpen} onOpenChange={setIsAssignOpen}>
+            <DialogTrigger asChild>
+              <Button>Assign Shift</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Assign Shift</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Staff</Label>
+                  <Select value={String(form.userId || '')} onValueChange={(v) => setForm(prev => ({ ...prev, userId: v }))}>
+                    <SelectTrigger><SelectValue placeholder="Select staff" /></SelectTrigger>
+                    <SelectContent>
+                      {users.map(u => <SelectItem key={u.id} value={String(u.id)}>{u.username}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label>Start</Label>
+                    <Input type="datetime-local" value={form.start} onChange={e => setForm(prev => ({ ...prev, start: e.target.value }))} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>End</Label>
+                    <Input type="datetime-local" value={form.end} onChange={e => setForm(prev => ({ ...prev, end: e.target.value }))} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Note</Label>
+                  <Input value={form.note} onChange={e => setForm(prev => ({ ...prev, note: e.target.value }))} placeholder="Optional" />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setIsAssignOpen(false)}>Cancel</Button>
+                <Button onClick={assign}>Assign</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Upcoming</CardTitle>
+          <CardDescription>{loading ? 'Loading…' : `${assignments.length} items`}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Staff</TableHead>
+                <TableHead>Start</TableHead>
+                <TableHead>End</TableHead>
+                <TableHead>Note</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(assignments || []).map(a => (
+                <TableRow key={a.id}>
+                  <TableCell>{a.user?.username}</TableCell>
+                  <TableCell>{new Date(a.start).toLocaleString()}</TableCell>
+                  <TableCell>{a.end ? new Date(a.end).toLocaleString() : '—'}</TableCell>
+                  <TableCell>{a.note || '—'}</TableCell>
+                  <TableCell className="text-right space-x-2">
+                    <Button size="sm" variant="outline" onClick={() => update(a.id, { status: 'COMPLETED' })}>Complete</Button>
+                    <Button size="sm" variant="destructive" onClick={() => remove(a.id)}>Delete</Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </>
+  );
 };
 
 const PayrollManagement = () => {
     const [staff, setStaff] = useState([]);
+    const [loading, setLoading] = useState(false);
 
-    useEffect(() => {
-        const savedStaff = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
-        setStaff(savedStaff);
-    }, []);
-
-    const handleSalaryChange = (staffId, newSalary) => {
-        const updatedStaff = staff.map(s => s.id === staffId ? { ...s, salary: parseFloat(newSalary) || 0 } : s);
-        setStaff(updatedStaff);
+    const getBranchId = () => {
+        try { const s = JSON.parse(localStorage.getItem('loungeUser') || 'null'); return s?.branchId || s?.branch?.id || ''; } catch { return ''; }
     };
 
-    const handleSaveSalaries = () => {
-        localStorage.setItem('loungeUsers', JSON.stringify(staff));
-        toast({ title: "Salaries Saved", description: "Staff salary information has been updated." });
+    const load = async () => {
+        const branchId = getBranchId();
+        if (!branchId) { setStaff([]); return; }
+        try {
+            setLoading(true);
+            const [users, payroll] = await Promise.all([
+                api.users.list({ branchId }),
+                api.hrm.payroll.list({ branchId }),
+            ]);
+            const entries = Array.isArray(payroll?.items) ? payroll.items : (Array.isArray(payroll) ? payroll : []);
+            const merged = (users || []).map(u => ({
+                ...u,
+                salary: (entries.find(p => String(p.userId) === String(u.id))?.salary) ?? ''
+            }));
+            setStaff(merged);
+        } catch (e) {
+            setStaff([]);
+            toast({ title: 'Failed to load payroll', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setLoading(false); }
+    };
+
+    useEffect(() => { load(); }, []);
+
+    const handleSalaryChange = (staffId, newSalary) => {
+        setStaff(prev => prev.map(s => s.id === staffId ? { ...s, salary: newSalary } : s));
+    };
+
+    const handleSaveSalaries = async () => {
+        try {
+            const branchId = getBranchId();
+            await Promise.all(
+                staff
+                  .filter(s => s.salary !== undefined && s.salary !== null && s.salary !== '')
+                  .map(s => api.hrm.payroll.set({ branchId, userId: s.id, salary: Number(s.salary) || 0 }))
+            );
+            toast({ title: "Salaries Saved", description: "Staff salary information has been updated on the server." });
+        } catch (e) {
+            toast({ title: 'Save failed', description: String(e?.message || e), variant: 'destructive' });
+        } finally {
+            await load();
+        }
     };
 
     return (
         <Card>
             <CardHeader>
                 <CardTitle>Manage Payroll</CardTitle>
-                <CardDescription>Set basic monthly salaries for your staff.</CardDescription>
+                <CardDescription>{loading ? 'Loading…' : 'Set basic monthly salaries for your staff.'}</CardDescription>
             </CardHeader>
             <CardContent>
                 <Table>
@@ -308,52 +605,84 @@ const LeaveManagement = () => {
     const [newLeave, setNewLeave] = useState({ staffId: '', startDate: '', endDate: '', reason: '' });
     const [newEndDate, setNewEndDate] = useState('');
 
-    useEffect(() => {
-        const savedRequests = JSON.parse(localStorage.getItem('loungeLeaveRequests') || '[]');
-        setLeaveRequests(savedRequests);
-        const savedStaff = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
-        setStaff(savedStaff);
-    }, []);
-
-    const updateLeaveRequests = (updatedRequests) => {
-        setLeaveRequests(updatedRequests);
-        localStorage.setItem('loungeLeaveRequests', JSON.stringify(updatedRequests));
+    const getBranchId = () => {
+        try {
+            const s = JSON.parse(localStorage.getItem('loungeUser') || 'null');
+            return s?.branchId || s?.branch?.id || '';
+        } catch { return ''; }
     };
 
-    const handleScheduleLeave = () => {
+    const reload = async () => {
+        const branchId = getBranchId();
+        if (!branchId) { setLeaveRequests([]); setStaff([]); return; }
+        try {
+            const [users, leaves] = await Promise.all([
+                api.users.list({ branchId }),
+                api.hrm.leaves.list({ branchId }),
+            ]);
+            setStaff(Array.isArray(users) ? users : []);
+            const items = Array.isArray(leaves?.items) ? leaves.items : (Array.isArray(leaves) ? leaves : []);
+            setLeaveRequests(items);
+        } catch {
+            setStaff([]);
+            setLeaveRequests([]);
+        }
+    };
+
+    useEffect(() => { reload(); }, []);
+
+    const handleScheduleLeave = async () => {
         if (!newLeave.staffId || !newLeave.startDate || !newLeave.endDate || !newLeave.reason) {
             toast({ title: "Missing Information", description: "Please fill all fields.", variant: "destructive" });
             return;
         }
-        const staffMember = staff.find(s => s.id.toString() === newLeave.staffId);
-        const newRequest = {
-            id: Date.now(),
-            staffName: staffMember.username,
-            ...newLeave,
-            status: 'Scheduled'
-        };
-        updateLeaveRequests([...leaveRequests, newRequest]);
-        toast({ title: "Leave Scheduled", description: `Leave for ${staffMember.username} has been scheduled.` });
-        setIsScheduleLeaveOpen(false);
-        setNewLeave({ staffId: '', startDate: '', endDate: '', reason: '' });
+        try {
+            const branchId = getBranchId();
+            await api.hrm.leaves.create({
+                branchId,
+                userId: newLeave.staffId,
+                startDate: newLeave.startDate,
+                endDate: newLeave.endDate,
+                reason: newLeave.reason,
+                status: 'Scheduled',
+            });
+            toast({ title: "Leave Scheduled", description: `Leave has been scheduled.` });
+            setIsScheduleLeaveOpen(false);
+            setNewLeave({ staffId: '', startDate: '', endDate: '', reason: '' });
+            await reload();
+        } catch (e) {
+            toast({ title: 'Schedule failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
-    const handleStatusChange = (requestId, status) => {
-        const updatedRequests = leaveRequests.map(req => req.id === requestId ? { ...req, status } : req);
-        updateLeaveRequests(updatedRequests);
-        toast({ title: `Leave status updated to "${status}"`, description: "Leave request status has been updated." });
+    const handleStatusChange = async (requestId, status) => {
+        try {
+            await api.hrm.leaves.update(requestId, { status });
+            toast({ title: `Leave status updated to "${status}"` });
+            await reload();
+        } catch (e) {
+            toast({ title: 'Update failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
-    const handleCallOffLeave = (requestId) => {
-        const updatedRequests = leaveRequests.map(req => req.id === requestId ? { ...req, status: 'Called Off', endDate: new Date().toISOString().split('T')[0] } : req);
-        updateLeaveRequests(updatedRequests);
-        toast({ title: "Leave Called Off", description: "The leave has been marked as ended." });
+    const handleCallOffLeave = async (requestId) => {
+        try {
+            await api.hrm.leaves.update(requestId, { status: 'Called Off', endDate: new Date().toISOString().split('T')[0] });
+            toast({ title: "Leave Called Off" });
+            await reload();
+        } catch (e) {
+            toast({ title: 'Update failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
-    const handleDeleteLeave = (requestId) => {
-        const updatedRequests = leaveRequests.filter(req => req.id !== requestId);
-        updateLeaveRequests(updatedRequests);
-        toast({ title: "Leave Canceled", description: "The scheduled leave has been removed." });
+    const handleDeleteLeave = async (requestId) => {
+        try {
+            await api.hrm.leaves.remove(String(requestId));
+            toast({ title: "Leave Canceled" });
+            await reload();
+        } catch (e) {
+            toast({ title: 'Delete failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
     const openExtendLeaveModal = (request) => {
@@ -362,16 +691,20 @@ const LeaveManagement = () => {
         setIsExtendLeaveOpen(true);
     };
 
-    const handleExtendLeave = () => {
+    const handleExtendLeave = async () => {
         if (!newEndDate) {
             toast({ title: "Invalid Date", description: "Please select a new end date.", variant: "destructive" });
             return;
         }
-        const updatedRequests = leaveRequests.map(req => req.id === leaveToExtend.id ? { ...req, endDate: newEndDate, status: 'Extended' } : req);
-        updateLeaveRequests(updatedRequests);
-        toast({ title: "Leave Extended", description: "The leave has been successfully extended." });
-        setIsExtendLeaveOpen(false);
-        setLeaveToExtend(null);
+        try {
+            await api.hrm.leaves.update(leaveToExtend.id, { endDate: newEndDate, status: 'Extended' });
+            toast({ title: "Leave Extended" });
+            setIsExtendLeaveOpen(false);
+            setLeaveToExtend(null);
+            await reload();
+        } catch (e) {
+            toast({ title: 'Extend failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
     const isLeaveFuture = (leave) => {
@@ -512,28 +845,44 @@ const RecruitmentManagement = () => {
     const [jobOpenings, setJobOpenings] = useState([]);
     const [newOpening, setNewOpening] = useState({ title: '', department: '' });
 
-    useEffect(() => {
-        const savedOpenings = JSON.parse(localStorage.getItem('loungeJobOpenings') || '[]');
-        setJobOpenings(savedOpenings);
-    }, []);
+    const getBranchId = () => {
+        try { const s = JSON.parse(localStorage.getItem('loungeUser') || 'null'); return s?.branchId || s?.branch?.id || ''; } catch { return ''; }
+    };
 
-    const handleAddOpening = () => {
+    const reload = async () => {
+        try {
+            const branchId = getBranchId();
+            const res = await api.hrm.recruitment.list({ branchId });
+            const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+            setJobOpenings(items);
+        } catch { setJobOpenings([]); }
+    };
+
+    useEffect(() => { reload(); }, []);
+
+    const handleAddOpening = async () => {
         if (!newOpening.title || !newOpening.department) {
             toast({ title: "Missing Information", description: "Please provide a title and department.", variant: "destructive" });
             return;
         }
-        const updatedOpenings = [...jobOpenings, { id: Date.now(), ...newOpening, status: 'Open' }];
-        setJobOpenings(updatedOpenings);
-        localStorage.setItem('loungeJobOpenings', JSON.stringify(updatedOpenings));
-        setNewOpening({ title: '', department: '' });
-        toast({ title: "Job Opening Added" });
+        try {
+            await api.hrm.recruitment.create({ branchId: getBranchId(), title: newOpening.title, department: newOpening.department, status: 'Open' });
+            setNewOpening({ title: '', department: '' });
+            await reload();
+            toast({ title: "Job Opening Added" });
+        } catch (e) {
+            toast({ title: 'Create failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
-    const handleDeleteOpening = (id) => {
-        const updatedOpenings = jobOpenings.filter(job => job.id !== id);
-        setJobOpenings(updatedOpenings);
-        localStorage.setItem('loungeJobOpenings', JSON.stringify(updatedOpenings));
-        toast({ title: "Job Opening Deleted" });
+    const handleDeleteOpening = async (id) => {
+        try {
+            await api.hrm.recruitment.remove(String(id));
+            await reload();
+            toast({ title: "Job Opening Deleted" });
+        } catch (e) {
+            toast({ title: 'Delete failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
     return (
@@ -586,24 +935,38 @@ const PerformanceManagement = () => {
     const [staff, setStaff] = useState([]);
     const [newReview, setNewReview] = useState({ staffId: '', rating: 0, comments: '' });
 
-    useEffect(() => {
-        const savedReviews = JSON.parse(localStorage.getItem('loungePerformanceReviews') || '[]');
-        setReviews(savedReviews);
-        const savedStaff = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
-        setStaff(savedStaff);
-    }, []);
+    const getBranchId = () => {
+        try { const s = JSON.parse(localStorage.getItem('loungeUser') || 'null'); return s?.branchId || s?.branch?.id || ''; } catch { return ''; }
+    };
 
-    const handleAddReview = () => {
+    const reload = async () => {
+        try {
+            const branchId = getBranchId();
+            const [users, revs] = await Promise.all([
+                api.users.list({ branchId }),
+                api.hrm.reviews.list({ branchId })
+            ]);
+            setStaff(Array.isArray(users) ? users : []);
+            const items = Array.isArray(revs?.items) ? revs.items : (Array.isArray(revs) ? revs : []);
+            setReviews(items);
+        } catch { setReviews([]); setStaff([]); }
+    };
+
+    useEffect(() => { reload(); }, []);
+
+    const handleAddReview = async () => {
         if (!newReview.staffId || !newReview.rating) {
             toast({ title: "Missing Information", description: "Please select a staff member and provide a rating.", variant: "destructive" });
             return;
         }
-        const staffMember = staff.find(s => s.id.toString() === newReview.staffId.toString());
-        const updatedReviews = [...reviews, { id: Date.now(), ...newReview, staffName: staffMember.username, date: new Date().toLocaleDateString() }];
-        setReviews(updatedReviews);
-        localStorage.setItem('loungePerformanceReviews', JSON.stringify(updatedReviews));
-        setNewReview({ staffId: '', rating: 0, comments: '' });
-        toast({ title: "Review Added" });
+        try {
+            await api.hrm.reviews.create({ branchId: getBranchId(), userId: newReview.staffId, rating: Number(newReview.rating), comments: newReview.comments });
+            setNewReview({ staffId: '', rating: 0, comments: '' });
+            await reload();
+            toast({ title: "Review Added" });
+        } catch (e) {
+            toast({ title: 'Create failed', description: String(e?.message || e), variant: 'destructive' });
+        }
     };
 
     return (

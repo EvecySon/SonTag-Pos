@@ -4,26 +4,56 @@ export declare class TablesService {
     constructor(prisma: PrismaService);
     listBySection(sectionId: string): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
-        createdAt: Date;
-        updatedAt: Date;
+        capacity: number;
     }[]>;
-    lock(id: string): Promise<{
+    create(sectionId: string, name: string, capacity?: number, status?: string, role?: string): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
-        createdAt: Date;
-        updatedAt: Date;
+        capacity: number;
     }>;
-    unlock(id: string): Promise<{
+    update(id: string, name?: string, sectionId?: string, capacity?: number, status?: string, role?: string): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
+        capacity: number;
+    }>;
+    remove(id: string, role?: string): Promise<{
+        id: string;
         createdAt: Date;
         updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
+    }>;
+    lock(id: string, role?: string): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
+    }>;
+    unlock(id: string, role?: string): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
     }>;
 }

@@ -4,26 +4,66 @@ export declare class TablesController {
     constructor(tables: TablesService);
     list(sectionId: string): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
-        createdAt: Date;
-        updatedAt: Date;
+        capacity: number;
     }[]>;
-    lock(id: string): Promise<{
+    create(body: {
+        sectionId: string;
+        name: string;
+        capacity?: number;
+        status?: string;
+    }, req: any): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
-        createdAt: Date;
-        updatedAt: Date;
+        capacity: number;
     }>;
-    unlock(id: string): Promise<{
+    update(id: string, body: {
+        name?: string;
+        sectionId?: string;
+        capacity?: number;
+        status?: string;
+    }, req: any): Promise<{
         id: string;
+        createdAt: Date;
+        updatedAt: Date;
         name: string;
         status: string;
         sectionId: string;
+        capacity: number;
+    }>;
+    remove(id: string, req: any): Promise<{
+        id: string;
         createdAt: Date;
         updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
+    }>;
+    lock(id: string, req: any): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
+    }>;
+    unlock(id: string, req: any): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        name: string;
+        status: string;
+        sectionId: string;
+        capacity: number;
     }>;
 }

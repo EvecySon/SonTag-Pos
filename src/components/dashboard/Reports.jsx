@@ -25,6 +25,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import ReportViewer from '@/components/dashboard/reports/ReportViewer';
+import ReportOverview from '@/components/dashboard/ReportOverview';
+import ReportsPage from '@/components/dashboard/ReportsPage';
+import { hasPermission } from '@/lib/permissions';
 
 const reportCategories = [
   {
@@ -72,6 +75,32 @@ const reportCategories = [
   },
 ];
 
+const reportPermMap = {
+  // Profit & Sales Reports
+  'profit-loss': 'view_profit_loss_report',
+  'purchase-sale': 'view_purchase_sell_report',
+  'product-sell': 'view_product_performance_report',
+  'trending-product': 'view_trending_product_report',
+  // Stock & Inventory Reports
+  'stock': 'view_stock_related_reports',
+  'stock-adjustment': 'view_stock_related_reports',
+  'items': 'view_product_stock_value',
+  'product-purchase': 'view_purchase_detail_report',
+  // Payment & Expense Reports
+  'purchase-payment': 'view_purchase_detail_report',
+  'sell-payment': 'view_payment_methods_report',
+  'expense': 'view_expense_report',
+  // Staff & Customer Reports
+  'supplier-customer': 'view_supplier_customer_report',
+  'customer-group': 'view_supplier_customer_report',
+  'staff': 'view_sales_rep_report',
+  'shift-register': 'view_register_report',
+  'leave': 'view_daily_sales_summary',
+  // Operational Reports
+  'table': 'view_branch_sales_report',
+  'activity-log': 'view_voids_report',
+};
+
 const ReportCard = ({ report, onSelect }) => {
   const Icon = report.icon;
   return (
@@ -102,90 +131,10 @@ const ReportCard = ({ report, onSelect }) => {
 
 const Reports = ({ user }) => {
   const [viewingReport, setViewingReport] = useState(null);
-
-  if (viewingReport) {
-    return (
-      <div>
-        <Button onClick={() => setViewingReport(null)} variant="outline" className="mb-4">
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to Reports
-        </Button>
-        <ReportViewer report={viewingReport} user={user} />
-      </div>
-    );
-  }
+  const perms = Array.isArray(user?.permissions) ? user.permissions : [];
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-3xl font-bold gradient-text mb-2">Reports Dashboard</h2>
-        <p className="text-muted-foreground">Analyze your business performance with detailed reports.</p>
-      </div>
-
-      <Tabs defaultValue="all" className="w-full">
-        <TabsList className="grid w-full grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
-          <TabsTrigger value="all">All Reports</TabsTrigger>
-          <TabsTrigger value="sales">Sales</TabsTrigger>
-          <TabsTrigger value="stock">Stock</TabsTrigger>
-          <TabsTrigger value="payments">Payments</TabsTrigger>
-          <TabsTrigger value="people">Staff & Customers</TabsTrigger>
-          <TabsTrigger value="ops">Operations</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="all" className="mt-6">
-          {reportCategories.map((category, index) => (
-            <div key={index} className="mb-8">
-              <h3 className="text-2xl font-semibold mb-4">{category.title}</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                {category.reports.map((report, reportIndex) => (
-                  <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-                ))}
-              </div>
-            </div>
-          ))}
-        </TabsContent>
-
-        <TabsContent value="sales" className="mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {reportCategories.find(c => c.title.includes('Sales')).reports.map((report, reportIndex) => (
-              <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-            ))}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="stock" className="mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {reportCategories.find(c => c.title.includes('Stock')).reports.map((report, reportIndex) => (
-              <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-            ))}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="payments" className="mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {reportCategories.find(c => c.title.includes('Payment')).reports.map((report, reportIndex) => (
-              <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-            ))}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="people" className="mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {reportCategories.find(c => c.title.includes('Staff')).reports.map((report, reportIndex) => (
-              <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-            ))}
-          </div>
-        </TabsContent>
-
-        <TabsContent value="ops" className="mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {reportCategories.find(c => c.title.includes('Operational')).reports.map((report, reportIndex) => (
-              <ReportCard key={reportIndex} report={report} onSelect={setViewingReport} />
-            ))}
-          </div>
-        </TabsContent>
-      </Tabs>
-    </div>
+    <ReportsPage />
   );
 };
 

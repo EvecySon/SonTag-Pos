@@ -1,28 +1,27 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/use-toast';
+import { Input } from '@/components/ui/input';
 
 const PinModal = ({ isOpen, onClose, onSuccess, user }) => {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
-  const [overridePin, setOverridePin] = useState('');
   const [graceWindow, setGraceWindow] = useState(0);
   const [gracePeriodActive, setGracePeriodActive] = useState(false);
   const [graceTimer, setGraceTimer] = useState(null);
 
   useEffect(() => {
-    const savedSettings = JSON.parse(localStorage.getItem('loungeSettings'));
-    if (savedSettings) {
-      setOverridePin(savedSettings.overridePin || '');
-      setGraceWindow(savedSettings.graceWindow || 0);
-    }
+    // No local override. Backend is source of truth.
+    setGraceWindow(0);
   }, []);
 
   useEffect(() => {
@@ -50,21 +49,24 @@ const PinModal = ({ isOpen, onClose, onSuccess, user }) => {
     setPin(pin.slice(0, -1));
   };
 
-  const handleVerify = () => {
+  const handleVerify = async () => {
     if (gracePeriodActive) {
       onSuccess();
       return;
     }
-
-    const userPin = user.role === 'admin' ? '1234' : '0000'; // Fallback/user pin
-    if (pin === userPin || (overridePin && pin === overridePin)) {
+    try {
+      const branchId = user?.branchId || user?.branch?.id || undefined;
+      const res = await api.hrm.overridePin.verify({ branchId, pin });
+      if (!res || res.ok !== true) throw new Error('Invalid PIN');
       toast({ title: 'PIN Accepted!', variant: 'default' });
-      if (overridePin && pin === overridePin && graceWindow > 0) {
+      const seconds = Number(res.graceSeconds || 0);
+      if (seconds > 0) {
+        setGraceWindow(seconds);
         setGracePeriodActive(true);
       }
       onSuccess();
       closeModal();
-    } else {
+    } catch (e) {
       setError('Invalid PIN. Please try again.');
       setPin('');
       toast({ title: 'Invalid PIN', variant: 'destructive' });
@@ -92,42 +94,28 @@ const PinModal = ({ isOpen, onClose, onSuccess, user }) => {
     <Dialog open={isOpen} onOpenChange={closeModal}>
       <DialogContent className="sm:max-w-[425px] bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-foreground text-2xl">Manager Approval Required</DialogTitle>
+          <DialogTitle className="text-foreground text-2xl">Global Override Required</DialogTitle>
           <DialogDescription>
-            Please enter your PIN to authorize this action.
+            Please enter the global override PIN to authorize this action.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col items-center space-y-4 py-4">
-          <div className="flex space-x-3">
-            {[...Array(4)].map((_, i) => (
-              <div
-                key={i}
-                className={`w-12 h-14 border-2 rounded-md flex items-center justify-center text-2xl font-bold ${
-                  pin.length > i ? 'border-primary' : 'border-border'
-                }`}
-              >
-                {pin[i] ? '•' : ''}
-              </div>
-            ))}
-          </div>
-          {error && <p className="text-destructive text-sm">{error}</p>}
-          <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-              <Button key={num} variant="outline" className="h-14 text-xl" onClick={() => handlePinChange(num.toString())}>
-                {num}
-              </Button>
-            ))}
-            <Button variant="outline" className="h-14 text-xl" onClick={handleBackspace}>
-              ⌫
-            </Button>
-            <Button variant="outline" className="h-14 text-xl" onClick={() => handlePinChange('0')}>
-              0
-            </Button>
-            <Button className="h-14 text-xl bg-accent hover:bg-accent/90" onClick={handleVerify}>
-              OK
-            </Button>
-          </div>
+        <div className="flex flex-col space-y-4 py-4">
+          <Input
+            type="password"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            placeholder="••••"
+            value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/[^0-9]/g, '').slice(0,4))}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleVerify(); if (e.key === 'Backspace') setError(''); }}
+            className="text-center tracking-widest text-xl"
+          />
+          {error && <p className="text-destructive text-sm text-center">{error}</p>}
         </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={closeModal}>Cancel</Button>
+          <Button onClick={handleVerify} disabled={pin.length !== 4}>OK</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

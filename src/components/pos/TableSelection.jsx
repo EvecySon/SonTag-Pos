@@ -4,42 +4,71 @@ import { Utensils, CheckCircle, Lock, User } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/use-toast';
+import { api } from '@/lib/api';
 
 const TableSelection = ({ session, setSession, user }) => {
   const [tables, setTables] = useState([]);
+  const [sections, setSections] = useState([]);
+  const [sectionId, setSectionId] = useState(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem('loungeTables');
-    if (saved) {
-      setTables(JSON.parse(saved));
-    } else {
-      const initial = [
-        { id: 1, name: 'T1', status: 'available', capacity: 4, locked_by: null },
-        { id: 2, name: 'T2', status: 'occupied', capacity: 4, locked_by: 'Jane Smith' },
-        { id: 3, name: 'T3', status: 'available', capacity: 2, locked_by: null },
-        { id: 4, name: 'T4', status: 'available', capacity: 6, locked_by: null },
-        { id: 5, name: 'T5', status: 'reserved', capacity: 4, locked_by: null },
-        { id: 6, name: 'B1', status: 'occupied', capacity: 8, locked_by: 'John Doe' },
-      ];
-      setTables(initial);
-      localStorage.setItem('loungeTables', JSON.stringify(initial));
-    }
-  }, []);
+    const loadSections = async () => {
+      try {
+        if (!user?.branchId) return;
+        const rows = await api.sections.list({ branchId: user.branchId });
+        setSections(rows || []);
+        // prefer a non-store/kitchen section if possible
+        const preferred = (rows || []).find(s => !String(s.name||'').toLowerCase().includes('store') && !String(s.name||'').toLowerCase().includes('kitchen')) || (rows && rows[0]);
+        const resolvedSectionId = session?.sectionId || preferred?.id || null;
+        setSectionId(resolvedSectionId);
+        if (resolvedSectionId) {
+          const tables = await api.tables.list({ sectionId: resolvedSectionId });
+          setTables((tables || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, status: t.locked ? 'occupied' : 'available', capacity: t.capacity || 0, locked_by: t.lockedBy || null })));
+        } else {
+          setTables([]);
+        }
+      } catch (e) {
+        setSections([]);
+        setTables([]);
+      }
+    };
+    loadSections();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.branchId]);
 
-  const handleSelectTable = (table) => {
+  useEffect(() => {
+    const loadTables = async () => {
+      try {
+        if (!sectionId) return;
+        const rows = await api.tables.list({ sectionId });
+        setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, status: t.locked ? 'occupied' : 'available', capacity: t.capacity || 0, locked_by: t.lockedBy || null })));
+      } catch {
+        setTables([]);
+      }
+    };
+    loadTables();
+  }, [sectionId]);
+
+  const handleSelectTable = async (table) => {
     if (table.status !== 'available') {
       toast({ title: 'Table Not Available', description: `This table is currently ${table.status}.`, variant: 'destructive' });
       return;
     }
-    
-    const updatedTables = tables.map(t => 
-      t.id === table.id ? { ...t, status: 'occupied', locked_by: user.username } : t
-    );
-    setTables(updatedTables);
-    localStorage.setItem('loungeTables', JSON.stringify(updatedTables));
-    
-    setSession({ ...session, table: { ...table, status: 'occupied', locked_by: user.username } });
-    toast({ title: `Table ${table.name} Selected`, description: `Locked by ${user.username}` });
+    try {
+      await api.tables.lock(table.id);
+      const rows = await api.tables.list({ sectionId });
+      setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, status: t.locked ? 'occupied' : 'available', capacity: t.capacity || 0, locked_by: t.lockedBy || null })));
+      setSession({ ...session, sectionId, table: { id: table.id, name: table.name, status: 'occupied' } });
+      toast({ title: `Table ${table.name} Selected`, description: `Locked by ${user.username}` });
+    } catch (e) {
+      const message = (e && e.message) ? e.message : 'Failed to lock table';
+      toast({ title: 'Lock Failed', description: message, variant: 'destructive' });
+      // try refresh in case conflict/409
+      try {
+        const rows = await api.tables.list({ sectionId });
+        setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, status: t.locked ? 'occupied' : 'available', capacity: t.capacity || 0, locked_by: t.lockedBy || null })));
+      } catch {}
+    }
   };
 
   const getStatusVisuals = (table) => {
@@ -63,6 +92,20 @@ const TableSelection = ({ session, setSession, user }) => {
       <div>
         <h2 className="text-3xl font-bold gradient-text mb-2">Select a Table</h2>
         <p className="text-gray-600">Choose a table to start an order</p>
+        {sections?.length > 0 && (
+          <div className="mt-3">
+            <label className="text-sm mr-2">Section:</label>
+            <select
+              className="border rounded px-2 py-1 text-sm"
+              value={sectionId || ''}
+              onChange={(e) => setSectionId(e.target.value)}
+            >
+              {sections.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6">
         {tables.map((table) => {

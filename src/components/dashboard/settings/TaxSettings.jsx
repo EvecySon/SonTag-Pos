@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Info } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -18,10 +19,12 @@ const TaxSettings = ({ onBack }) => {
   });
 
   useEffect(() => {
-    const loadedSettings = JSON.parse(localStorage.getItem('loungeTaxSettings'));
-    if (loadedSettings) {
-      setTaxSettings(loadedSettings);
-    }
+    (async () => {
+      try {
+        const data = await api.taxes?.get?.();
+        if (data) setTaxSettings(prev => ({ ...prev, ...data }));
+      } catch {}
+    })();
   }, []);
 
   const handleInputChange = (e) => {
@@ -33,13 +36,14 @@ const TaxSettings = ({ onBack }) => {
     setTaxSettings(prev => ({ ...prev, enableInlineTax: checked }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    localStorage.setItem('loungeTaxSettings', JSON.stringify(taxSettings));
-    toast({
-      title: '✅ Settings Updated',
-      description: 'Your tax settings have been successfully saved.',
-    });
+    try {
+      await api.taxes?.update?.(taxSettings);
+      toast({ title: '✅ Settings Updated', description: 'Your tax settings have been successfully saved.' });
+    } catch (err) {
+      toast({ title: 'Save failed', description: String(err?.message || err), variant: 'destructive' });
+    }
   };
 
   return (

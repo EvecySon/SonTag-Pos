@@ -1,39 +1,32 @@
+import type { Response, Request } from 'express';
 import { AuthService } from './auth.service';
 declare class RegisterDto {
-    username: string;
-    email: string;
-    password: string;
-    branchName: string;
-    branchLocation: string;
+    username?: string;
+    email?: string;
+    password?: string;
+    branchName?: string;
+    branchLocation?: string;
+    fullName?: string;
 }
 declare class LoginDto {
-    username: string;
-    password: string;
+    username?: string;
+    email?: string;
+    password?: string;
 }
 export declare class AuthController {
-    private readonly authService;
-    constructor(authService: AuthService);
-    register(dto: RegisterDto): Promise<{
-        user: {
-            token: string;
-            user: {
-                username: string;
-                email: string;
-                id: string;
-                role: import("@prisma/client").$Enums.Role;
-                branchId: string | null;
-            };
-        };
+    private readonly auth;
+    constructor(auth: AuthService);
+    register(dto: RegisterDto, res: Response, req: Request): Promise<{
+        token: any;
+        user: any;
     }>;
-    login(dto: LoginDto): Promise<{
-        token: string;
-        user: {
-            id: string;
-            username: string;
-            email: string;
-            role: import("@prisma/client").$Enums.Role;
-            branchId: string | null;
-        };
+    login(dto: LoginDto, res: Response, req: Request): Promise<{
+        token: any;
+        user: any;
     }>;
+    logout(res: Response, req: Request): Promise<{
+        ok: boolean;
+    }>;
+    refresh(res: Response, req: Request): Promise<any>;
 }
 export {};

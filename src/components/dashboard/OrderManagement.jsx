@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { ListOrdered, Clock, CheckCircle, RefreshCw, XCircle, MoreVertical, Eye, Printer, Coins as HandCoins, Undo2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,71 +13,73 @@ import {
 import OrderDetailsModal from '@/components/dashboard/orders/OrderDetailsModal';
 import RefundModal from '@/components/dashboard/orders/RefundModal';
 import PrintView from '@/components/pos/PrintView';
-import Receipt from '@/components/dashboard/orders/Receipt';
+import { api } from '@/lib/api';
 
 const OrderManagement = ({ user }) => {
   const [orders, setOrders] = useState([]);
   const [viewingOrder, setViewingOrder] = useState(null);
   const [refundingOrder, setRefundingOrder] = useState(null);
-  const [printingOrder, setPrintingOrder] = useState(null);
+  const [printData, setPrintData] = useState(null);
+  const printRef = useRef();
 
   useEffect(() => {
-    const saved = localStorage.getItem('loungeOrders');
-    if (saved) {
-      setOrders(JSON.parse(saved));
-    } else {
-        const initial = [
-            { id: '#1234', items: [{name: 'Espresso', quantity: 2, price: 4.50}], total: 9.00, timestamp: new Date().toISOString(), staff: 'Jane Smith', status: 'Paid', paymentMethod: 'Card' },
-            { id: '#1233', items: [{name: 'Club Sandwich', quantity: 1, price: 12.00}], total: 12.00, timestamp: new Date(Date.now() - 3600000).toISOString(), staff: 'John Doe', status: 'Paid', paymentMethod: 'Cash' },
-            { id: '#1232', items: [{name: 'Latte', quantity: 1, price: 4.25}, {name: 'Croissant', quantity: 1, price: 4.25}], total: 8.50, timestamp: new Date(Date.now() - 7200000).toISOString(), staff: 'Jane Smith', status: 'Paid', paymentMethod: 'Card' },
-        ];
-        setOrders(initial);
-        localStorage.setItem('loungeOrders', JSON.stringify(initial));
-    }
-  }, []);
+    const load = async () => {
+      try {
+        if (!user?.branchId) { setOrders([]); return; }
+        const rows = await api.orders.list({ branchId: user.branchId });
+        setOrders(rows || []);
+      } catch (_) {
+        setOrders([]);
+      }
+    };
+    load();
+  }, [user?.branchId]);
 
-  const updateOrders = (newOrders) => {
-    setOrders(newOrders);
-    localStorage.setItem('loungeOrders', JSON.stringify(newOrders));
+  const refreshOrders = async () => {
+    if (!user?.branchId) { setOrders([]); return; }
+    const rows = await api.orders.list({ branchId: user.branchId });
+    setOrders(rows || []);
   };
 
-  const handleConfirmRefund = (orderId, reason) => {
-    const orderToRefund = orders.find(order => order.id === orderId);
-    if (!orderToRefund) return;
-
-    // Update inventory
-    const savedInventory = localStorage.getItem('loungeInventory');
-    if (savedInventory) {
-      let inventory = JSON.parse(savedInventory);
-      orderToRefund.items.forEach(refundedItem => {
-        inventory = inventory.map(inventoryItem => {
-          if (inventoryItem.name.toLowerCase() === refundedItem.name.toLowerCase()) {
-            return { ...inventoryItem, quantity: inventoryItem.quantity + refundedItem.quantity };
-          }
-          return inventoryItem;
-        });
-      });
-      localStorage.setItem('loungeInventory', JSON.stringify(inventory));
+  const handleConfirmRefund = async (orderId, reason) => {
+    try {
+      await api.orders.refund(orderId);
+      await refreshOrders();
+      setRefundingOrder(null);
+      toast({ title: 'Refund Processed', description: `Order ${orderId} refunded and stock updated.` });
+    } catch (e) {
+      toast({ title: 'Refund failed', description: String(e?.message || e), variant: 'destructive' });
     }
-
-    // Update order status
-    const newOrders = orders.map(order => 
-      order.id === orderId ? { ...order, status: 'Refunded', refundReason: reason } : order
-    );
-    updateOrders(newOrders);
-    setRefundingOrder(null);
-    toast({
-      title: 'Refund Processed',
-      description: `Order ${orderId} refunded and stock updated.`,
-    });
   };
 
-  const handlePrintReceipt = (order) => {
-    setPrintingOrder(order);
-    setTimeout(() => {
-      window.print();
-      setPrintingOrder(null);
-    }, 100);
+  // Auto-print when printData is set
+  useEffect(() => {
+    if (printData) {
+      const t = setTimeout(() => {
+        try { window.print(); } catch {}
+        setPrintData(null);
+      }, 100);
+      return () => clearTimeout(t);
+    }
+  }, [printData]);
+
+  const handleViewDetails = async (order) => {
+    try {
+      const full = await api.orders.get(String(order.id));
+      setViewingOrder({ ...order, ...(full || {}) });
+    } catch (_) {
+      setViewingOrder(order);
+    }
+  };
+
+  const handlePrintReceipt = async (order) => {
+    try {
+      const full = await api.orders.get(String(order.id));
+      setPrintData({ type: 'final-receipt', data: { ...(full || order), isReceipt: true } });
+    } catch (_) {
+      setPrintData({ type: 'final-receipt', data: { ...order, isReceipt: true } });
+      toast({ title: 'Printing with limited data', description: 'Full order could not be loaded.' });
+    }
   };
 
   const getStatusVisuals = (status) => {
@@ -97,10 +99,8 @@ const OrderManagement = ({ user }) => {
 
   return (
     <>
-      {printingOrder && (
-        <PrintView>
-          <Receipt order={printingOrder} />
-        </PrintView>
+      {printData && (
+        <PrintView ref={printRef} type={printData.type} data={printData.data} />
       )}
       <div className="space-y-6">
         <div className="flex items-center justify-between">
@@ -117,7 +117,13 @@ const OrderManagement = ({ user }) => {
           <CardContent>
             <div className="space-y-4">
               {orders.map((order, index) => {
-                const { icon: Icon, color, bgColor } = getStatusVisuals(order.status);
+                const rawStatus = String(order.status || '');
+                const statusUpper = rawStatus.toUpperCase();
+                const statusLabel = statusUpper === 'PAID' ? 'Paid' : (statusUpper === 'CANCELLED' ? 'Refunded' : rawStatus);
+                const { icon: Icon, color, bgColor } = getStatusVisuals(statusLabel);
+                const invoice = order.displayInvoice || order.invoice_no || order.invoiceNo || order.receiptNo || (order.orderNumber ? `#${order.orderNumber}` : null) || order.id;
+                const sectionName = order.sectionName || order.section?.name;
+                const branchName = order.branchName || order.branch?.name;
                 return (
                   <motion.div
                     key={order.id}
@@ -132,15 +138,18 @@ const OrderManagement = ({ user }) => {
                           <ListOrdered className={`w-6 h-6 ${color}`} />
                         </div>
                         <div>
-                          <p className="font-bold text-gray-800 dark:text-gray-200 text-lg">{order.id}</p>
-                          <p className="text-xs text-gray-500 dark:text-gray-400">{new Date(order.timestamp).toLocaleString()}</p>
+                          <p className="font-bold text-gray-800 dark:text-gray-200 text-lg">{invoice}</p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">{new Date(order.createdAt || order.timestamp).toLocaleString()}</p>
+                          {(branchName || sectionName) && (
+                            <p className="text-xs text-gray-500 dark:text-gray-400">{branchName ? `${branchName}` : ''}{branchName && sectionName ? ' • ' : ''}{sectionName ? `${sectionName}` : ''}</p>
+                          )}
                         </div>
                       </div>
                       <div className="text-right">
-                         <p className="font-bold gradient-text text-xl">${(order.total || 0).toFixed(2)}</p>
+                         <p className="font-bold gradient-text text-xl">${(parseFloat(String(order.total ?? 0)) || 0).toFixed(2)}</p>
                          <div className="flex items-center justify-end gap-2 mt-1">
-                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${bgColor} ${color}`}>{order.status}</span>
-                            <span className="text-xs text-gray-500 dark:text-gray-400">by {order.staff}</span>
+                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${bgColor} ${color}`}>{statusLabel}</span>
+                            {order.staff && <span className="text-xs text-gray-500 dark:text-gray-400">by {order.staff}</span>}
                          </div>
                       </div>
                       <DropdownMenu>
@@ -150,7 +159,7 @@ const OrderManagement = ({ user }) => {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => setViewingOrder(order)}>
+                            <DropdownMenuItem onClick={() => handleViewDetails(order)}>
                                 <Eye className="mr-2 h-4 w-4" />
                                 <span>View Details</span>
                             </DropdownMenuItem>
@@ -158,7 +167,7 @@ const OrderManagement = ({ user }) => {
                                 <Printer className="mr-2 h-4 w-4" />
                                 <span>Print Receipt</span>
                             </DropdownMenuItem>
-                            {order.status === 'Paid' && (
+                            {(['Paid','PAID'].includes(rawStatus)) && (
                               <DropdownMenuItem onClick={() => setRefundingOrder(order)} className="text-amber-600 focus:text-amber-600">
                                   <HandCoins className="mr-2 h-4 w-4" />
                                   <span>Process Refund</span>

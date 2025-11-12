@@ -1,72 +1,108 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/use-toast';
-import { DollarSign, CreditCard, Landmark, Layers, FileText, User, Phone } from 'lucide-react';
+import { DollarSign, CreditCard, Landmark, Layers, FileText, User } from 'lucide-react';
 
 const PaymentModal = ({ isOpen, onClose, totalAmount, onPaymentSuccess, initialTab = 'cash' }) => {
     const [activeTab, setActiveTab] = useState(initialTab);
     const [cashReceived, setCashReceived] = useState('');
     const [multiPay, setMultiPay] = useState({ cash: '', card: '', bank: '' });
-    const [creditCustomer, setCreditCustomer] = useState({ name: '', phone: '' });
+    const [creditCustomer, setCreditCustomer] = useState({ name: '' });
+    const [busy, setBusy] = useState(false);
+    const [businessName, setBusinessName] = useState(() => {
+        try { return (JSON.parse(localStorage.getItem('businessInfo') || '{}') || {}).name || ''; } catch { return ''; }
+    });
 
     useEffect(() => {
         if (isOpen) {
             setCashReceived('');
             setMultiPay({ cash: '', card: '', bank: '' });
-            setCreditCustomer({ name: '', phone: '' });
+            setCreditCustomer({ name: '' });
             setActiveTab(initialTab);
         }
+        try { setBusinessName((JSON.parse(localStorage.getItem('businessInfo') || '{}') || {}).name || ''); } catch {}
     }, [isOpen, initialTab]);
 
     const change = cashReceived ? parseFloat(cashReceived) - totalAmount : -totalAmount;
     
-    const handleCashPayment = () => {
+    const handleCashPayment = async () => {
         if (change < 0) {
             toast({ title: "Insufficient Amount", description: "Cash received is less than the total amount.", variant: "destructive" });
             return;
         }
-        onPaymentSuccess({
-            method: 'cash',
-            total: totalAmount,
-            received: parseFloat(cashReceived),
-            change: change
-        });
+        try {
+            setBusy(true);
+            let paymentId;
+            if (api.payments?.create) {
+                // Optional pre-create cash receipt (parent may still finalize order)
+                const res = await api.payments.create({ method: 'cash', amount: String(totalAmount), received: String(parseFloat(cashReceived)) });
+                paymentId = res?.id;
+            }
+            onPaymentSuccess({ method: 'cash', total: totalAmount, received: parseFloat(cashReceived), change, paymentId });
+        } catch (e) {
+            toast({ title: 'Payment error', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setBusy(false); }
     };
 
-    const handleCardPayment = () => {
-        toast({ title: "Processing...", description: "Connecting to card terminal..." });
-        setTimeout(() => {
-            onPaymentSuccess({
-                method: 'card',
-                total: totalAmount
-            });
-        }, 1500);
+    const handleCardPayment = async () => {
+        try {
+            setBusy(true);
+            toast({ title: "Processing...", description: "Connecting to card terminal..." });
+            let paymentId;
+            if (api.terminals?.charge) {
+                const r = await api.terminals.charge({ amount: String(totalAmount) });
+                paymentId = r?.paymentId || r?.id;
+            } else if (api.payments?.initiateCard) {
+                const r = await api.payments.initiateCard({ amount: String(totalAmount) });
+                paymentId = r?.id;
+            } else {
+                // fallback simulation
+                await new Promise(res => setTimeout(res, 1200));
+            }
+            onPaymentSuccess({ method: 'card', total: totalAmount, paymentId });
+        } catch (e) {
+            toast({ title: 'Card payment failed', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setBusy(false); }
     };
     
-    const handleBankTransferPayment = () => {
-        onPaymentSuccess({
-            method: 'bank transfer',
-            total: totalAmount
-        });
+    const handleBankTransferPayment = async () => {
+        try {
+            setBusy(true);
+            let paymentId;
+            if (api.payments?.create) {
+                const r = await api.payments.create({ method: 'bank', amount: String(totalAmount) });
+                paymentId = r?.id;
+            }
+            onPaymentSuccess({ method: 'bank transfer', total: totalAmount, paymentId });
+        } catch (e) {
+            toast({ title: 'Payment error', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setBusy(false); }
     };
 
-    const handleCreditSale = () => {
-        if (!creditCustomer.name || !creditCustomer.phone) {
-            toast({ title: "Customer Details Required", description: "Please enter customer name and phone number.", variant: "destructive" });
+    const handleCreditSale = async () => {
+        if (!creditCustomer.name) {
+            toast({ title: "Customer Name Required", description: "Please enter customer name.", variant: "destructive" });
             return;
         }
-        onPaymentSuccess({
-            method: 'credit sale',
-            total: totalAmount,
-            customer: creditCustomer
-        });
+        try {
+            setBusy(true);
+            let token;
+            if (api.payments?.initiateCredit) {
+                const r = await api.payments.initiateCredit({ amount: String(totalAmount), customer: creditCustomer });
+                token = r?.id;
+            }
+            onPaymentSuccess({ method: 'credit sale', total: totalAmount, customer: creditCustomer, token });
+        } catch (e) {
+            toast({ title: 'Credit initiation failed', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setBusy(false); }
     };
 
-    const handleMultiPay = () => {
+    const handleMultiPay = async () => {
         const cashPart = parseFloat(multiPay.cash || 0);
         const cardPart = parseFloat(multiPay.card || 0);
         const bankPart = parseFloat(multiPay.bank || 0);
@@ -76,12 +112,24 @@ const PaymentModal = ({ isOpen, onClose, totalAmount, onPaymentSuccess, initialT
             toast({ title: "Incorrect Amount", description: `The amounts must sum up to $${totalAmount.toFixed(2)}.`, variant: "destructive"});
             return;
         }
-
-        onPaymentSuccess({
-            method: 'multiple',
-            total: totalAmount,
-            details: { cash: cashPart, card: cardPart, bank: bankPart }
-        });
+        try {
+            setBusy(true);
+            let paymentId;
+            if (api.payments?.createSplit) {
+                const r = await api.payments.createSplit({
+                    amount: String(totalAmount),
+                    entries: [
+                        ...(cashPart ? [{ method: 'cash', amount: String(cashPart) }] : []),
+                        ...(cardPart ? [{ method: 'card', amount: String(cardPart) }] : []),
+                        ...(bankPart ? [{ method: 'bank', amount: String(bankPart) }] : []),
+                    ],
+                });
+                paymentId = r?.id;
+            }
+            onPaymentSuccess({ method: 'multiple', total: totalAmount, details: { cash: cashPart, card: cardPart, bank: bankPart }, paymentId });
+        } catch (e) {
+            toast({ title: 'Split payment failed', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setBusy(false); }
     };
 
     const remainingForMultiPay = totalAmount - parseFloat(multiPay.cash || 0) - parseFloat(multiPay.card || 0) - parseFloat(multiPay.bank || 0);
@@ -119,13 +167,13 @@ const PaymentModal = ({ isOpen, onClose, totalAmount, onPaymentSuccess, initialT
                         <div className={`p-4 rounded-md text-center font-bold text-xl ${change >= 0 ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                            {change >= 0 ? `Change: $${change.toFixed(2)}` : `Remaining: $${(-change).toFixed(2)}`}
                         </div>
-                        <Button className="w-full" onClick={handleCashPayment} disabled={change < 0}>Confirm Cash Payment</Button>
+                        <Button className="w-full" onClick={handleCashPayment} disabled={change < 0 || busy}>Confirm Cash Payment</Button>
                     </TabsContent>
 
                     <TabsContent value="card" className="py-4 text-center space-y-4">
                         <p>Follow instructions on the card terminal.</p>
                         <CreditCard className="w-24 h-24 mx-auto text-muted-foreground"/>
-                        <Button className="w-full" onClick={handleCardPayment}>Process Card Payment</Button>
+                        <Button className="w-full" onClick={handleCardPayment} disabled={busy}>Process Card Payment</Button>
                     </TabsContent>
 
                     <TabsContent value="credit" className="py-4 space-y-4">
@@ -137,24 +185,17 @@ const PaymentModal = ({ isOpen, onClose, totalAmount, onPaymentSuccess, initialT
                                 <Input id="customer-name" value={creditCustomer.name} onChange={(e) => setCreditCustomer({...creditCustomer, name: e.target.value})} placeholder="Enter customer's full name" className="pl-8"/>
                             </div>
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="customer-phone">Phone Number</Label>
-                            <div className="relative">
-                                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                                <Input id="customer-phone" type="tel" value={creditCustomer.phone} onChange={(e) => setCreditCustomer({...creditCustomer, phone: e.target.value})} placeholder="Enter customer's phone number" className="pl-8"/>
-                            </div>
-                        </div>
-                        <Button className="w-full" onClick={handleCreditSale}>Confirm Credit Sale</Button>
+                        <Button className="w-full" onClick={handleCreditSale} disabled={busy}>Confirm Credit Sale</Button>
                     </TabsContent>
 
                     <TabsContent value="bank" className="py-4 space-y-4">
                          <div className="p-4 bg-muted rounded-md text-sm">
                             <p className="font-semibold">Bank: Awesome Bank Inc.</p>
-                            <p>Account Name: Lounge ERP</p>
+                            <p>Account Name: {businessName}</p>
                             <p>Account Number: 1234567890</p>
                             <p>Reference: Order #{Math.floor(Date.now() / 1000)}</p>
                         </div>
-                        <Button className="w-full" onClick={handleBankTransferPayment}>Confirm Payment Received</Button>
+                        <Button className="w-full" onClick={handleBankTransferPayment} disabled={busy}>Confirm Payment Received</Button>
                     </TabsContent>
 
                     <TabsContent value="multiple" className="py-4 space-y-4">
@@ -175,7 +216,7 @@ const PaymentModal = ({ isOpen, onClose, totalAmount, onPaymentSuccess, initialT
                         <div className={`p-3 rounded-md text-center font-semibold ${remainingForMultiPay.toFixed(2) == 0.00 ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                            Remaining: ${remainingForMultiPay.toFixed(2)}
                         </div>
-                        <Button className="w-full" onClick={handleMultiPay} disabled={remainingForMultiPay.toFixed(2) != 0.00}>Confirm Split Payment</Button>
+                        <Button className="w-full" onClick={handleMultiPay} disabled={remainingForMultiPay.toFixed(2) != 0.00 || busy}>Confirm Split Payment</Button>
                     </TabsContent>
                 </Tabs>
                 <DialogFooter>

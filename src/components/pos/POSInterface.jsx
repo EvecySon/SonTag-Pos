@@ -1,13 +1,42 @@
+  
+// Normalize prices payload from backend into a simple { [productId]: number } map
+function normalizePricesMap(prices) {
+  const out = {};
+  try {
+    if (!prices) return out;
+    if (Array.isArray(prices)) {
+      for (const row of prices) {
+        const pid = String(row?.productId ?? row?.id ?? row?.product?.id ?? '');
+        if (!pid) continue;
+        const val = Number(row?.price ?? row?.amount ?? row?.value);
+        out[pid] = Number.isFinite(val) ? val : 0;
+      }
+      return out;
+    }
+    if (typeof prices === 'object') {
+      for (const [k, v] of Object.entries(prices)) {
+        const key = String(k);
+        const val = Number(v);
+        out[key] = Number.isFinite(val) ? val : 0;
+      }
+      return out;
+    }
+  } catch {}
+  return out;
+}
 
-    import React, { useState, useEffect, useRef } from 'react';
+    import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Plus, Minus, X, Wifi, WifiOff, Sun, Moon, Bell, Coffee, Wallet, Trash2, ChevronDown, ArrowLeft, Eye, DollarSign, Info, FileText, FolderOpen, CreditCard, Landmark, Layers, Printer, User as UserIcon, ChefHat, Beer, LogOut, Download, Pencil } from 'lucide-react';
+import { Search, Plus, Minus, X, Wifi, WifiOff, Sun, Moon, Bell, Coffee, Wallet, Trash2, ChevronDown, ArrowLeft, Eye, DollarSign, Info, FileText, FolderOpen, CreditCard, Landmark, Layers, Printer, User as UserIcon, ChefHat, Beer, LogOut, Download, Pencil, Image, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/use-toast';
 import PinModal from '@/components/pos/PinModal';
+import OverridePinModal from '@/components/common/OverridePinModal';
+import ServiceStaffPinModal from '@/components/common/ServiceStaffPinModal';
+import { hasPermission, hasAny } from '@/lib/permissions';
 import PaymentModal from '@/components/pos/PaymentModal';
 import CashDrawerModal from '@/components/pos/CashDrawerModal';
 import CardTerminalModal from '@/components/pos/CardTerminalModal';
@@ -23,21 +52,78 @@ import {
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { api } from '@/lib/api';
+import { api, getApiBaseUrl } from '@/lib/api';
+
+// Lightweight theme applier using CSS variables; supports at least 5 themes
+function applyTheme(name) {
+  const root = document.documentElement;
+  const THEMES = {
+    light: {
+      '--background': '0 0% 100%',
+      '--foreground': '222.2 84% 4.9%',
+      '--card': '0 0% 100%',
+      '--primary': '221.2 83.2% 53.3%',
+      '--accent': '210 40% 96.1%',
+      '--pos-background': '0 0% 100%',
+    },
+    dark: {
+      '--background': '224 71% 4%',
+      '--foreground': '210 40% 98%',
+      '--card': '222.2 84% 4.9%',
+      '--primary': '217.2 91.2% 59.8%',
+      '--accent': '217.2 32.6% 17.5%',
+      '--pos-background': '0 0% 100%',
+    },
+    emerald: {
+      '--background': '0 0% 100%',
+      '--foreground': '222.2 84% 4.9%',
+      '--card': '0 0% 100%',
+      '--primary': '160 84% 43%',
+      '--accent': '210 40% 96.1%',
+      '--pos-background': '0 0% 100%',
+    },
+    rose: {
+      '--background': '0 0% 100%',
+      '--foreground': '24 24% 11%',
+      '--card': '0 0% 100%',
+      '--primary': '346 77% 58%',
+      '--accent': '45 93% 50%',
+      '--pos-background': '0 0% 100%',
+    },
+    slate: {
+      '--background': '210 40% 98%',
+      '--foreground': '222.2 84% 4.9%',
+      '--card': '0 0% 100%',
+      '--primary': '215 16% 47%',
+      '--accent': '210 40% 96.1%',
+      '--pos-background': '0 0% 100%',
+    },
+  };
+}
+
+// Safe money formatter for numbers or numeric strings with business currency
+function fmt(v) {
+  try {
+    const info = JSON.parse(localStorage.getItem('businessInfo') || '{}');
+    const code = info?.currency || info?.currencyCode || '';
+    const sym = info?.currencySymbol || '';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return `${sym ? sym + ' ' : ''}0.00`;
+    if (code) {
+      try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }).format(n); } catch {}
+    }
+    return `${sym ? sym + ' ' : ''}${n.toFixed(2)}`;
+  } catch {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+  }
+}
 
 
-const serviceTypes = ['Dine-in', 'Takeaway', 'Delivery', 'Pickup'];
+const defaultServiceTypes = ['Dine-in', 'Takeaway'];
 const customerTypes = ['Walk-in', 'Member', 'VIP', 'Corporate'];
 
-const categories = ['All', 'Bar', 'Kitchen', 'Neutral'];
-
-const defaultTables = [
-    { id: 't1', name: 'T1', section: 'Main Bar', status: 'available' },
-    { id: 't2', name: 'T2', section: 'Main Bar', status: 'occupied' },
-    { id: 't3', name: 'T3', section: 'Lounge Bar', status: 'available' },
-    { id: 'c1', name: 'C1', section: 'Club Section', status: 'available' },
-    { id: 'r1', name: 'R1', section: 'Rooftop Bar', status: 'available' },
-];
+const categories = ['All'];
 
 
 const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLogout, shiftRegister, onShiftClose, draftToLoad, onClearDraftToLoad }) => {
@@ -46,7 +132,8 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
   const [cart, setCart] = useState([]);
   const [currentSection, setCurrentSection] = useState('');
   const [branchSections, setBranchSections] = useState([]);
-  const [currentService, setCurrentService] = useState(serviceTypes[0]);
+  const [serviceTypes, setServiceTypes] = useState([]);
+  const [currentService, setCurrentService] = useState('');
   const [currentCustomer, setCurrentCustomer] = useState(customerTypes[0]);
   const [selectedTable, setSelectedTable] = useState(null);
   const [isPinModalOpen, setPinModalOpen] = useState(false);
@@ -60,133 +147,607 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
   const [isDraftsOpen, setIsDraftsOpen] = useState(false);
   const [editingDraft, setEditingDraft] = useState(null);
   const [printData, setPrintData] = useState(null);
+  const [reservationKey, setReservationKey] = useState(() => {
+    try { return `CART|${(crypto && crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2)}`; } catch { return `CART|${Math.random().toString(36).slice(2)}`; }
+  });
   const printRef = useRef();
+  const cartRef = useRef(cart);
+  const sectionRef = useRef(currentSection);
+  const reservationKeyRef = useRef(reservationKey);
   const [products, setProducts] = useState([]);
   const [stockLevels, setStockLevels] = useState({});
+  const [stockReady, setStockReady] = useState(false);
   const [sectionPrices, setSectionPrices] = useState({});
   const [userPermissions, setUserPermissions] = useState([]);
   const [serviceStaffList, setServiceStaffList] = useState([]);
   const [selectedStaff, setSelectedStaff] = useState(null);
+  const [isServicePinModalOpen, setServicePinModalOpen] = useState(false);
+  const [pendingStaffId, setPendingStaffId] = useState(null);
+  const [protectedActions, setProtectedActions] = useState(['decrement', 'void', 'delete_draft', 'approve_credit_sale']);
+  const [graceSeconds, setGraceSeconds] = useState(0);
+  const [isOverrideOpen, setOverrideOpen] = useState(false);
+  const [pendingOverride, setPendingOverride] = useState(null); // { type, payload, onApproved }
+  const [pendingCreditSale, setPendingCreditSale] = useState(null);
+  const addingLockRef = useRef(new Set());
+
+  // Optimistic stock: schedule a debounced refresh so backend snapshot does not clobber UI instantly
+  const scheduleRefreshPricingAndStock = (delayMs = 700) => {
+    try { setTimeout(() => { try { refreshPricingAndStock(); } catch {} }, Math.max(0, Number(delayMs) || 0)); } catch {}
+  };
+
+  // Optimistically mutate per-section stockLevels for a given product
+  const adjustLocalSectionStock = (productId, diff) => {
+    try {
+      if (!currentSection) return;
+      const sectionName = (branchSections || []).find(s => s.id === currentSection)?.name || '';
+      setStockLevels(prev => {
+        const next = { ...prev };
+        const pid = String(productId);
+        next[pid] = next[pid] || {};
+        const key = sectionName || 'default';
+        const cur = Number(next[pid][key] ?? 0);
+        const val = cur + Number(diff || 0);
+        const safe = Math.max(0, val);
+        next[pid][key] = safe;
+        if (sectionName) next[pid][sectionName] = safe;
+        // Keep fallback aligned to avoid UI using stale 'default' value
+        next[pid]['default'] = safe;
+        return next;
+      });
+      try { console.debug('[POS] optimistic section stock', { productId: String(productId), diff, sectionName: sectionName || 'default' }); } catch {}
+      setStockReady(true);
+    } catch {}
+  };
+
+  // Drafts pagination state (must be defined before use)
+  const [draftsPage, setDraftsPage] = useState(1);
+  const [draftsPageSize, setDraftsPageSize] = useState(20);
+  const [draftsTotal, setDraftsTotal] = useState(0);
+  const [loadingDrafts, setLoadingDrafts] = useState(false);
+
+  const draftsStorageKey = null;
+
+  // Load user permissions from current user or localStorage for UI gating
+  useEffect(() => {
+    try {
+      let perms = Array.isArray(user?.permissions) ? user.permissions : [];
+      if (!perms || perms.length === 0) {
+        const raw = localStorage.getItem('loungeUser');
+        if (raw) {
+          const stored = JSON.parse(raw);
+          if (Array.isArray(stored?.permissions)) perms = stored.permissions;
+          // ADMIN override handled by hasPermission helper
+        }
+      }
+      setUserPermissions(Array.isArray(perms) ? perms : []);
+    } catch { setUserPermissions([]); }
+  }, [user?.permissions]);
+
+  useEffect(() => {
+    // Always load drafts from backend when context changes
+    try { fetchDrafts(1); } catch {}
+  }, [currentSection, user?.branchId]);
+
+  // Load business settings (name, logo, currency, address, etc.) and cache for print templates
+  useEffect(() => {
+    (async () => {
+      try {
+        const bid = user?.branchId || user?.branch?.id || undefined;
+        const s = await api.settings.get(bid ? { branchId: bid } : {});
+        if (s) {
+          const info = {
+            name: s.businessName || '',
+            logoUrl: s.logoUrl || '',
+            address: s.address || '',
+            phone: s.phone || '',
+            email: s.email || '',
+            currencySymbol: s.currencySymbol || s.currency || '₦',
+            receiptFooterNote: s.receiptFooterNote || '',
+            invoiceFooterNote: s.invoiceFooterNote || '',
+          };
+          try { localStorage.setItem('businessInfo', JSON.stringify(info)); window.dispatchEvent(new Event('businessInfoUpdated')); } catch {}
+          // Apply admin-configured tax rate if present
+          if (typeof s.taxRate === 'number' && !Number.isNaN(s.taxRate)) {
+            setTaxRate(Number(s.taxRate));
+          }
+        }
+      } catch {}
+    })();
+  }, [user?.branchId]);
+
+  // Disable localStorage persistence for drafts; backend is source of truth
+
+  // Helper to map backend drafts to UI shape
+  const mapDrafts = (rows) => (rows || []).map(r => ({
+    id: r.id,
+    backendId: r.id,
+    name: r.name,
+    invoice: null,
+    cart: r.cart || [],
+    service: r.serviceType,
+    customer: r.customerName,
+    customerDetails: r.customerPhone ? { phone: r.customerPhone } : undefined,
+    table: r.tableId ? (tables.find(t => t.id === r.tableId) || { id: r.tableId, name: 'Table' }) : null,
+    sectionId: r.sectionId || currentSection,
+    total: Number(r.total || 0),
+    waiter: r.waiterId ? (serviceStaffList.find(s => s.id === r.waiterId)?.username || '') : '',
+    waiterId: r.waiterId || null,
+    orderId: r.orderId || null,
+    discount: { type: 'percentage', value: 0 },
+    taxRate: 10,
+    isSuspended: r.status === 'SUSPENDED',
+    reservationKey: r.reservationKey || null,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  }));
+
+  const fetchDrafts = async (page = 1) => {
+    setLoadingDrafts(true);
+    try {
+      const sec = (branchSections || []).find(s => s.id === currentSection);
+      const resolvedBranchId = user?.branchId || user?.branch?.id || sec?.branchId || undefined;
+      if (!resolvedBranchId) { // avoid 400s when branch not resolved yet
+        setDrafts([]);
+        setDraftsTotal(0);
+        return;
+      }
+      const res = await api.drafts.list({ branchId: resolvedBranchId, sectionId: currentSection, page, pageSize: draftsPageSize });
+      if (Array.isArray(res)) {
+        // Backward compatibility if server returns array
+        let items = mapDrafts(res);
+        // Enrich suspended drafts with invoice numbers
+        try {
+          const targets = items.filter(d => d.isSuspended && d.orderId);
+          if (targets.length) {
+            const settled = await Promise.allSettled(targets.map(d => api.orders.get(String(d.orderId))));
+            let idx = 0;
+            for (let i = 0; i < items.length; i++) {
+              if (items[i].isSuspended && items[i].orderId) {
+                const r = settled[idx++];
+                if (r?.status === 'fulfilled' && r.value) {
+                  const inv = r.value.displayInvoice || r.value.invoice_no || r.value.invoiceNo || r.value.receiptNo || r.value.orderNumber || r.value.id;
+                  items[i] = { ...items[i], invoice: inv ? String(inv) : null };
+                }
+              }
+            }
+          }
+        } catch {}
+        setDrafts(items);
+        setDraftsTotal(res.length);
+      } else if (res && Array.isArray(res.items)) {
+        let items = mapDrafts(res.items);
+        try {
+          const targets = items.filter(d => d.isSuspended && d.orderId);
+          if (targets.length) {
+            const settled = await Promise.allSettled(targets.map(d => api.orders.get(String(d.orderId))));
+            let idx = 0;
+            for (let i = 0; i < items.length; i++) {
+              if (items[i].isSuspended && items[i].orderId) {
+                const r = settled[idx++];
+                if (r?.status === 'fulfilled' && r.value) {
+                  const inv = r.value.displayInvoice || r.value.invoice_no || r.value.invoiceNo || r.value.receiptNo || r.value.orderNumber || r.value.id;
+                  items[i] = { ...items[i], invoice: inv ? String(inv) : null };
+                }
+              }
+            }
+          }
+        } catch {}
+        setDrafts(items);
+        setDraftsTotal(Number(res.total || 0));
+      } else {
+        setDrafts([]);
+        setDraftsTotal(0);
+      }
+      setDraftsPage(page);
+    } catch {
+      setDrafts([]);
+      setDraftsTotal(0);
+    } finally {
+      setLoadingDrafts(false);
+    }
+  };
+
+  const releaseReservations = async () => {
+    try {
+      const sectionId = sectionRef.current;
+      const items = Array.isArray(cartRef.current) ? [...cartRef.current] : [];
+      for (const it of items) {
+        try { await api.inventory.adjustInSection({ productId: it.id, sectionId, delta: +Number(it.qty || 0), reason: `RESV|${reservationKeyRef.current}|RELEASE` }); } catch {}
+      }
+    } catch {}
+  };
+
+  useEffect(() => { cartRef.current = cart; }, [cart]);
+  useEffect(() => { sectionRef.current = currentSection; }, [currentSection]);
+  useEffect(() => { reservationKeyRef.current = reservationKey; }, [reservationKey]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => { try { releaseReservations(); } catch {} };
+    try { window.addEventListener('beforeunload', handleBeforeUnload); } catch {}
+    return () => {
+      try { releaseReservations(); } catch {}
+      try { window.removeEventListener('beforeunload', handleBeforeUnload); } catch {}
+    };
+  }, []);
+
+  const handleSettleSuspended = async (draft, method) => {
+    try {
+      if (!hasAny(userPermissions, ['add_pos_sell', 'add_payment'])) {
+        toast({ title: 'Not allowed', description: 'You do not have permission to accept payments.', variant: 'destructive' });
+        return;
+      }
+      const orderId = draft?.orderId;
+      if (!orderId) { toast({ title: 'No order linked', description: 'This suspended bill has no orderId.', variant: 'destructive' }); return; }
+      await api.orders.addPayment(String(orderId), { method: String(method || 'cash'), amount: String(draft.total || 0), reference: undefined });
+      await api.orders.updateStatus(String(orderId), { status: 'PAID' });
+      // Remove draft locally and in backend
+      setDrafts(prev => prev.filter(d => d.id !== draft.id));
+      try { const backendId = draft.backendId || draft.id; if (backendId) await api.drafts.remove(String(backendId)); } catch {}
+      toast({ title: 'Suspended bill settled', description: `${draft.name} marked as PAID.` });
+      try { await fetchDrafts(draftsPage); } catch {}
+    } catch (e) {
+      toast({ title: 'Settle failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const handleViewSuspended = async (draft) => {
+    try {
+      if (!draft?.orderId) { toast({ title: 'Order not linked', description: 'No orderId on this draft.' }); return; }
+      const order = await api.orders.get(String(draft.orderId));
+      setViewOrder({ order, draft });
+    } catch (e) {
+      toast({ title: 'Load order failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const handleReturnAll = async () => {
+    const ctx = returnOrder;
+    if (!ctx?.orderId) { setReturnOrder(null); return; }
+    try {
+      await api.orders.refund(String(ctx.orderId));
+      // Remove draft if any
+      if (ctx.draft) {
+        setDrafts(prev => prev.filter(d => d.id !== ctx.draft.id));
+        try { const backendId = ctx.draft.backendId || ctx.draft.id; if (backendId) await api.drafts.remove(String(backendId)); } catch {}
+      }
+      toast({ title: 'Sale returned', description: 'Order marked as REFUNDED.' });
+      setReturnOrder(null);
+      try { await fetchDrafts(draftsPage); } catch {}
+    } catch (e) {
+      toast({ title: 'Return failed', description: String(e?.message || e), variant: 'destructive' });
+    }
+  };
+
+  const markTableStatus = (tableId, status) => {
+    try {
+      setTables(prev => prev.map(t => t.id === tableId ? { ...t, status } : t));
+    } catch {}
+  };
+
+  // (removed) Lock handler moved into CartPanel to avoid scope issues
+
+  // Load drafts from backend for cross-device persistence (and when page/section changes)
+  useEffect(() => {
+    fetchDrafts(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.branchId, currentSection, branchSections, draftsPageSize]);
+
+  // Whenever the Drafts dialog is opened, fetch fresh drafts from backend
+  useEffect(() => {
+    if (!isDraftsOpen) return;
+    fetchDrafts(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDraftsOpen, currentSection, user?.branchId]);
+
+  // Do not persist drafts to localStorage; backend is the source of truth
+
+  // Reconcile tables with drafts: unlock tables that are marked occupied but have no draft
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!currentSection) return;
+        // Build set of tableIds referenced by drafts
+        const draftTableIds = new Set((drafts || []).map(d => d.table?.id).filter(Boolean));
+        // For each occupied table with no draft, attempt unlock
+        const selectedId = selectedTable?.id || null;
+        const editingDraftTableId = editingDraft?.table?.id || null;
+        const toUnlock = (tables || [])
+          .filter(t => t.sectionId === currentSection)
+          .filter(t => t.status === 'occupied')
+          // keep the table user just selected or currently editing; do not auto-unlock these
+          .filter(t => t.id !== selectedId && t.id !== editingDraftTableId)
+          .filter(t => !draftTableIds.has(t.id));
+        for (const t of toUnlock) {
+          try { await updateTableStatus(t.id, 'available'); } catch {}
+        }
+      } catch {}
+    })();
+  }, [tables, drafts, currentSection, selectedTable?.id, editingDraft?.table?.id]);
+  const [lastOverrideAt, setLastOverrideAt] = useState(null);
+  const [lastOverrideBy, setLastOverrideBy] = useState(null);
   const [isSalesHistoryOpen, setIsSalesHistoryOpen] = useState(false);
   const [recentSales, setRecentSales] = useState([]);
+  const [businessInfo, setBusinessInfo] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('businessInfo') || '{}'); } catch { return {}; }
+  });
   const [allowOverselling, setAllowOverselling] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
+  const [sidebarCategories, setSidebarCategories] = useState(categories);
   const [taxRate, setTaxRate] = useState(10);
   const [discount, setDiscount] = useState({ type: 'percentage', value: 0 });
+  const [customers, setCustomers] = useState([]);
   const [isDiscountModalOpen, setIsDiscountModalOpen] = useState(false);
   const [isTaxModalOpen, setIsTaxModalOpen] = useState(false);
+  const [viewOrder, setViewOrder] = useState(null); // { order, draft }
+  const [returnOrder, setReturnOrder] = useState(null); // { orderId, draft }
+
+  // Helper to read a displayable category name from a product
+  const getProductCategoryName = (p) => {
+    try {
+      const name = p?.category?.name || p?.categoryName || p?.category || p?.station || '';
+      return String(name || '').trim();
+    } catch { return ''; }
+  };
 
   useEffect(() => {
     const loadFromBackend = async () => {
       try {
         // Load products for the user's branch
-        const prods = await api.products.list({ branchId: user.branchId });
-        setProducts(prods.map(p => ({ id: p.id, name: p.name, station: p.category || 'neutral', price: p.price ? parseFloat(p.price) : 0 })));
+        const prods = await api.products.list({ branchId: user?.branchId || undefined });
+        const base = getApiBaseUrl();
+        const absolutize = (u) => {
+          try {
+            if (!u) return '';
+            if (/^https?:\/\//i.test(u)) return u;
+            return `${base}${u.startsWith('/') ? '' : '/'}${u}`;
+          } catch { return u || ''; }
+        };
+        setProducts(prods.map(p => ({
+          id: String(p.id),
+          name: p.name,
+          station: p.category || 'neutral',
+          price: p.price ? parseFloat(p.price) : 0,
+          imageUrl: absolutize(p.imageUrl || p.image || p.thumbnailUrl || ''),
+        })));
 
         // Load inventory levels for the branch
-        const inv = await api.inventory.list({ branchId: user.branchId });
-        // Initialize section-based prices/stock with a simple default using current section
-        const currentSavedSectionPrices = JSON.parse(localStorage.getItem('loungeSectionPrices') || '{}');
+        const inv = await api.inventory.list({ branchId: user?.branchId || undefined });
+        // Initialize section-based prices/stock with defaults; prices will be filled by pricing API
         const currentSavedStockLevels = {};
         inv.forEach(row => {
-          currentSavedStockLevels[row.productId] = currentSavedStockLevels[row.productId] || {};
+          const pid = row && row.productId != null ? String(row.productId) : null;
+          if (!pid) return;
+          currentSavedStockLevels[pid] = currentSavedStockLevels[pid] || {};
           // Use section name later when available; prefill generic stock per current section
-          currentSavedStockLevels[row.productId]['default'] = row.qtyOnHand;
+          currentSavedStockLevels[pid]['default'] = Number(row.qtyOnHand || 0);
         });
         setStockLevels(currentSavedStockLevels);
-        setSectionPrices(currentSavedSectionPrices);
+        setStockReady(true);
+        setSectionPrices({});
       } catch (e) {
-        // Fall back to local data if backend fails
-        const savedProducts = localStorage.getItem('loungeProducts');
-        const savedStockLevels = localStorage.getItem('loungeStockLevels');
-        const savedSectionPrices = localStorage.getItem('loungeSectionPrices');
-        if (savedProducts) setProducts(JSON.parse(savedProducts));
-        if (savedStockLevels) setStockLevels(JSON.parse(savedStockLevels));
-        if (savedSectionPrices) setSectionPrices(JSON.parse(savedSectionPrices));
+        // silent
       }
     };
 
-    const savedOverselling = localStorage.getItem('loungeAllowOverselling');
-    const savedTaxSettings = JSON.parse(localStorage.getItem('loungeTaxSettings'));
-    const savedDiscounts = JSON.parse(localStorage.getItem('loungeDiscounts'));
+  
 
-    if (savedTaxSettings && savedTaxSettings.tax1Number) {
-      setTaxRate(parseFloat(savedTaxSettings.tax1Number));
-    }
-    setAllowOverselling(savedOverselling === 'true');
+    // Load overselling setting from backend (fallback to localStorage if unavailable)
+    (async () => {
+      try {
+        const bid = user?.branchId || user?.branch?.id || undefined;
+        const s = await api.inventory.settings.get(bid ? { branchId: bid } : {});
+        if (s && typeof s.allowOverselling === 'boolean') {
+          setAllowOverselling(!!s.allowOverselling);
+          try { localStorage.setItem('loungeAllowOverselling', String(!!s.allowOverselling)); } catch {}
+        } else {
+          try { const saved = localStorage.getItem('loungeAllowOverselling'); setAllowOverselling(saved === 'true'); } catch {}
+        }
+      } catch {
+        try { const saved = localStorage.getItem('loungeAllowOverselling'); setAllowOverselling(saved === 'true'); } catch {}
+      }
+    })();
 
     loadFromBackend();
 
+    // Sections and tables will be loaded from backend below
+  }, [user]);
+
+  // Keep in-memory businessInfo in sync when POS loads branch settings
+  useEffect(() => {
+    try { const info = JSON.parse(localStorage.getItem('businessInfo') || '{}'); setBusinessInfo(info || {}); } catch {}
+  }, [user?.branchId]);
+
+  // Apply theme from business settings
+  useEffect(() => {
+    if (businessInfo && businessInfo.theme) applyTheme(businessInfo.theme);
+  }, [businessInfo?.theme]);
+
+  // Load product categories for the sidebar filter from API, with product-derived fallback
+  useEffect(() => {
     (async () => {
       try {
-        if (!user.branchId) return;
-        const sections = await api.sections.list({ branchId: user.branchId });
+        if (!user?.branchId) return;
+        const rows = await api.categories.list({ branchId: user.branchId });
+        let names = [];
+        try {
+          const candidates = [];
+          if (Array.isArray(rows?.items)) candidates.push(...rows.items);
+          if (Array.isArray(rows?.data)) candidates.push(...rows.data);
+          if (Array.isArray(rows?.results)) candidates.push(...rows.results);
+          if (Array.isArray(rows)) candidates.push(...rows);
+          names = candidates.map(c => (c?.name || c?.title || c?.label || '').toString()).filter(Boolean);
+        } catch {}
+        const unique = Array.from(new Set(names));
+        let next = ['All', ...unique];
+        if (next.length <= 1) {
+          try {
+            const derived = Array.from(new Set((products || []).map(getProductCategoryName).filter(Boolean)));
+            next = ['All', ...derived];
+          } catch {}
+        }
+        setSidebarCategories(next.length > 1 ? next : categories);
+        setActiveCategory(prev => next.includes(prev) ? prev : 'All');
+      } catch {
+        setSidebarCategories(categories);
+      }
+    })();
+  }, [user?.branchId]);
+
+  // Derive categories once products are loaded if API did not populate
+  useEffect(() => {
+    try {
+      if (!products?.length) return;
+      if (Array.isArray(sidebarCategories) && sidebarCategories.length > 1) return;
+      const derived = Array.from(new Set(products.map(getProductCategoryName).filter(Boolean)));
+      const next = ['All', ...derived];
+      setSidebarCategories(next.length > 1 ? next : categories);
+      setActiveCategory(prev => next.includes(prev) ? prev : 'All');
+    } catch {}
+  }, [products]);
+
+  useEffect(() => {
+    try {
+      if (!products?.length) return;
+      if (Array.isArray(sidebarCategories) && sidebarCategories.length > 1) return;
+      const derived = Array.from(new Set(products.map(p => (p?.category?.name || p?.categoryName || p?.category || p?.station || '').toString()).filter(Boolean)));
+      const next = ['All', ...derived];
+      setSidebarCategories(next.length > 1 ? next : categories);
+      setActiveCategory(prev => next.includes(prev) ? prev : 'All');
+    } catch {}
+  }, [products]);
+
+  // Load override settings from backend
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!user?.branchId) return;
+        const settings = await api.hrm.overridePin.get({ branchId: user.branchId });
+        if (Array.isArray(settings?.protectedActions) && settings.protectedActions.length > 0) {
+          setProtectedActions(settings.protectedActions);
+        }
+        if (typeof settings?.graceSeconds === 'number') setGraceSeconds(settings.graceSeconds);
+      } catch {}
+    })();
+  }, [user?.branchId]);
+
+  // Load customers created by admin for this branch
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!user?.branchId) return;
+        let rows;
+        try {
+          rows = await api.customers.list({ branchId: user.branchId });
+        } catch (e) {
+          // Fallback if user lacks view_all permission
+          try { rows = await api.customers.mine({ branchId: user.branchId }); } catch {}
+        }
+        const items = Array.isArray(rows?.items) ? rows.items : rows; // support both shapes
+        setCustomers((items || []).map(c => ({ id: c.id, name: c.name || c.fullName || c.companyName || 'Unnamed' })));
+      } catch {}
+    })();
+  }, [user?.branchId]);
+
+  // Load service staff list
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!user?.branchId) { setServiceStaffList([]); return; }
+        const list = await api.users.list({ branchId: user.branchId });
+        const rows = Array.isArray(list) ? list : [];
+        const hasFlag = rows.some(u => typeof u?.isServiceStaff === 'boolean');
+        const filtered = hasFlag ? rows.filter(u => u.isServiceStaff) : rows; // fallback: include all if flag missing
+        setServiceStaffList(filtered.map(u => ({ id: u.id, username: u.username || u.firstName || u.surname || `user-${u.id}`, service_pin: u.service_pin })));
+      } catch { setServiceStaffList([]); }
+    })();
+  }, [user?.branchId]);
+
+  useEffect(() => {
+    const loadSections = async () => {
+      try {
+        const sections = await api.sections.list({ branchId: user?.branchId || undefined });
         setBranchSections(sections || []);
-        if (shiftRegister && shiftRegister.sectionId) {
-          setCurrentSection(shiftRegister.sectionId);
-        } else {
-          const firstValidSection = (sections || []).find(s => !String(s.name || '').toLowerCase().includes('store') && !String(s.name || '').toLowerCase().includes('kitchen'));
-          setCurrentSection(firstValidSection ? firstValidSection.id : ((sections && sections[0]) ? sections[0].id : ''));
+        const current = String(currentSection || '').trim();
+        if (!current) {
+          if (shiftRegister && shiftRegister.sectionId) {
+            setCurrentSection(shiftRegister.sectionId);
+          } else {
+            const firstValidSection = (sections || []).find(s => !String(s.name || '').toLowerCase().includes('store') && !String(s.name || '').toLowerCase().includes('kitchen'));
+            setCurrentSection(firstValidSection ? firstValidSection.id : ((sections && sections[0]) ? sections[0].id : ''));
+          }
         }
       } catch {
         setBranchSections([]);
         setCurrentSection('');
       }
-    })();
-
-    setTables([]);
-
-    const savedDrafts = localStorage.getItem('loungeDrafts');
-    if (savedDrafts) {
-      setDrafts(JSON.parse(savedDrafts));
-    }
-
-    const allRoles = JSON.parse(localStorage.getItem('loungeRoles') || '[]');
-    const currentUserRole = allRoles.find(r => r.name === user.role);
-    if (currentUserRole) {
-      setUserPermissions(currentUserRole.permissions);
-    }
-
-    const allUsers = JSON.parse(localStorage.getItem('loungeUsers') || '[]');
-    const staff = allUsers.filter(u => u.isServiceStaff);
-    setServiceStaffList(staff);
-    setSelectedStaff(user.isServiceStaff ? user.id : null);
-
-    const savedSales = localStorage.getItem('loungeRecentSales');
-    if (savedSales) {
-      setRecentSales(JSON.parse(savedSales));
-    }
+    };
+    loadSections();
+    // keep drafts and permissions persistent across navigation; do not clear here
+    setSelectedStaff(null);
+    setRecentSales([]);
 
   }, [user, shiftRegister]);
 
-  // Load effective prices for current section/branch and merge into sectionPrices
+  // Load effective prices for the current section so product cards display prices
   useEffect(() => {
-    const loadPrices = async () => {
+    (async () => {
       try {
-        if (!user?.branchId || !currentSection || !products?.length) return;
-        const pricesMap = await api.prices.effective({ branchId: user.branchId, sectionId: currentSection });
-        const sectionName = branchSections.find(s => s.id === currentSection)?.name || 'default';
-        const merged = JSON.parse(JSON.stringify(sectionPrices || {}));
-        Object.entries(pricesMap || {}).forEach(([pid, price]) => {
-          merged[pid] = merged[pid] || {};
-          merged[pid][sectionName] = price;
+        if (!currentSection) return;
+        const sec = (branchSections || []).find(s => s.id === currentSection);
+        const sectionName = sec?.name || '';
+        if (!sectionName) return;
+        const resolvedBranchId = user?.branchId || user?.branch?.id || sec?.branchId || undefined;
+        const map = await api.prices.effective({ branchId: resolvedBranchId, sectionId: currentSection });
+        const next = {};
+        Object.entries(map || {}).forEach(([pid, price]) => {
+          if (!next[pid]) next[pid] = {};
+          const n = Number(price);
+          next[pid][sectionName] = Number.isFinite(n) ? n : 0;
         });
-        setSectionPrices(merged);
-      } catch (e) {
-        // silent fallback
+        setSectionPrices((prev) => ({ ...prev, ...next }));
+      } catch {
+        // ignore
       }
-    };
-    loadPrices();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.branchId, currentSection, products?.length, branchSections]);
+    })();
+  }, [currentSection, user?.branchId, branchSections]);
 
+  // Reprice items in cart when section or its effective prices change
   useEffect(() => {
-    if (draftToLoad) {
-      handleLoadDraft(draftToLoad);
-      onClearDraftToLoad();
-    }
-  }, [draftToLoad]);
+    try {
+      if (!currentSection || !cart?.length) return;
+      const sectionName = (branchSections || []).find(s => s.id === currentSection)?.name || '';
+      if (!sectionName) return;
+      setCart(prev => prev.map(item => {
+        const p = Number(sectionPrices?.[item.id]?.[sectionName]);
+        if (Number.isFinite(p) && p >= 0) return { ...item, price: p };
+        return item;
+      }));
+    } catch {}
+  }, [currentSection, sectionPrices, branchSections]);
+
+  // Ensure per-section stock and prices are refreshed whenever section or branch context changes
+  useEffect(() => {
+    (async () => {
+      try { await refreshPricingAndStock(); } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSection, user?.branchId]);
+
+  // Load service types for the current branch and set a default if none selected
+  useEffect(() => {
+    (async () => {
+      try {
+        const branchId = user?.branchId || user?.branchId;
+        if (!branchId) return;
+        const list = await api.serviceTypes.list({ branchId });
+        let names = Array.isArray(list) ? list.map(s => s?.name).filter(Boolean) : [];
+        if (!names.length) names = defaultServiceTypes;
+        setServiceTypes(names);
+        if (!currentService && names.length > 0) setCurrentService(names[0]);
+      } catch {}
+    })();
+  }, [user?.branchId]);
 
   // Load tables whenever currentSection changes
   useEffect(() => {
@@ -194,11 +755,17 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       try {
         if (!currentSection) return;
         const rows = await api.tables.list({ sectionId: currentSection });
-        setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, section: t.sectionId, status: t.locked ? 'occupied' : 'available' })));
+        const mapped = (rows || []).map(t => ({
+          id: t.id,
+          name: t.name || t.code || t.id,
+          sectionId: t.sectionId || t.section?.id || t.section,
+          sectionName: t.section?.name || '',
+          status: ((String(t.status || '').toLowerCase() === 'locked') || (String(t.status || '').toLowerCase() === 'occupied') || !!t.locked) ? 'occupied' : 'available',
+          updatedAt: t.updatedAt || t.updated_at || null,
+        }));
+        setTables(mapped);
       } catch {
-        // fallback to local saved tables if API fails
-        const savedTables = localStorage.getItem('loungeTables');
-        if (savedTables) setTables(JSON.parse(savedTables));
+        // silent
       }
     };
     loadTables();
@@ -219,26 +786,129 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
 
   useEffect(() => {
     if (printData) {
+      let restored = false;
+      const prevTitle = document.title;
+      try { document.title = ' '; } catch {}
+      const restore = () => {
+        if (restored) return;
+        restored = true;
+        try { document.title = prevTitle; } catch {}
+      };
+      try { window.addEventListener('afterprint', restore, { once: true }); } catch {}
       const timer = setTimeout(() => {
         window.print();
         setPrintData(null);
+        // Fallback restore in case afterprint doesn't fire
+        setTimeout(restore, 500);
       }, 100);
-      return () => clearTimeout(timer);
+      return () => { clearTimeout(timer); restore(); };
     }
   }, [printData]);
   
+  // Explicit refresh helper for pricing and per-section stock
+  const refreshPricingAndStock = async () => {
+    try {
+      if (!currentSection) {
+        try { console.debug('[POS] skip refreshPricingAndStock: currentSection not set'); } catch {}
+        return;
+      }
+      const sec = (branchSections || []).find(s => s.id === currentSection);
+      const resolvedBranchId = user?.branchId || user?.branch?.id || sec?.branchId || undefined;
+      if (!resolvedBranchId) return;
+      // Refresh prices
+      let pricesMap = await api.prices.effective({ branchId: resolvedBranchId, sectionId: currentSection });
+      if (!pricesMap || (typeof pricesMap === 'object' && Object.keys(pricesMap).length === 0)) {
+        // Fallback: try branch-level prices if section-specific are empty
+        try { pricesMap = await api.prices.effective({ branchId: resolvedBranchId }); } catch {}
+      }
+      const sectionName = branchSections.find(s => s.id === currentSection)?.name || 'default';
+      setSectionPrices(prev => {
+        const merged = JSON.parse(JSON.stringify(prev || {}));
+        const norm = normalizePricesMap(pricesMap);
+        Object.entries(norm || {}).forEach(([pid, price]) => {
+          merged[pid] = merged[pid] || {};
+          const incoming = Number(price) || 0;
+          const existing = Number(merged[pid][sectionName] ?? 0) || 0;
+          merged[pid][sectionName] = incoming > 0 ? incoming : (existing > 0 ? existing : 0);
+        });
+        return merged;
+      });
+    } catch {}
+    try {
+      if (!currentSection) {
+        try { console.debug('[POS] skip stock refresh: currentSection not set'); } catch {}
+        return;
+      }
+      // Refresh stock by section
+      const rows = await api.inventory.listBySection({ sectionId: currentSection });
+      const secName = branchSections.find(s => s.id === currentSection)?.name || '';
+      if (!secName) {
+        try { console.debug('[POS] section name unresolved for id', currentSection, rows); } catch {}
+        return;
+      }
+      try { console.debug('[POS] section inventory rows', { sectionId: currentSection, sectionName: secName, rowsCount: (rows||[]).length, sample: (rows||[])[0] }); } catch {}
+      setStockLevels(prev => {
+        const next = { ...prev };
+        const byProduct = {};
+        const counts = [];
+        (rows || []).forEach(r => {
+          const pidRaw = r.productId || (r.product && r.product.id);
+          const pid = pidRaw != null ? String(pidRaw) : null;
+          if (!pid) return;
+          const q = Number(r.qtyOnHand || 0);
+          byProduct[pid] = q;
+          counts.push(q);
+        });
+        Object.keys(byProduct).forEach(pid => {
+          next[pid] = next[pid] || {};
+          next[pid][secName] = byProduct[pid];
+          // Keep fallback aligned to the active section to avoid flicker from stale 'default'
+          next[pid]['default'] = byProduct[pid];
+        });
+        return next;
+      });
+      // Do not fallback to branch totals; if section has no stock, keep it at zero for this section
+      setStockReady(true);
+    } catch {}
+  };
+  
   const updateTableStatus = async (tableId, status) => {
     try {
+      const current = tables.find(t => t.id === tableId)?.status;
+      if (current === status) return true; // no-op
       if (status === 'occupied') await api.tables.lock(tableId);
       if (status === 'available') await api.tables.unlock(tableId);
+      // Update UI only on success
+      setTables(prevTables => prevTables.map(t => t.id === tableId ? { ...t, status } : t));
+      return true;
     } catch (e) {
-      // fallback to local-only update if API fails
+      const msg = String(e?.message || '');
+      // Tolerate idempotent cases from backend and treat as success
+      if (status === 'available' && /not locked/i.test(msg)) {
+        setTables(prevTables => prevTables.map(t => t.id === tableId ? { ...t, status: 'available' } : t));
+        return true;
+      }
+      if (status === 'occupied' && /already locked/i.test(msg)) {
+        setTables(prevTables => prevTables.map(t => t.id === tableId ? { ...t, status: 'occupied' } : t));
+        return true;
+      }
+      // Do not mutate local state on failure; refresh from backend to get true status
+      toast({ title: 'Table status not changed', description: (e?.message || 'Please try again.'), variant: 'destructive' });
+      try {
+        if (currentSection) {
+          const rows = await api.tables.list({ sectionId: currentSection });
+          setTables((rows || []).map(t => ({
+            id: t.id,
+            name: t.name || t.code || t.id,
+            sectionId: t.sectionId || t.section?.id || t.section,
+            sectionName: t.section?.name || '',
+            status: (t.locked || String(t.status || '').toLowerCase() === 'locked') ? 'occupied' : 'available',
+            updatedAt: t.updatedAt || t.updated_at || null,
+          })));
+        }
+      } catch {}
+      return false;
     }
-    setTables(prevTables => {
-      const updatedTables = prevTables.map(t => t.id === tableId ? { ...t, status } : t);
-      localStorage.setItem('loungeTables', JSON.stringify(updatedTables));
-      return updatedTables;
-    });
   };
 
   const handlePinRequest = (action) => {
@@ -254,13 +924,26 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
   const handlePinSuccess = (action) => {
     toast({ title: "PIN Verified!", description: `Action '${action.type}' authorized.` });
     if(action.type === 'clear_cart') {
+      const prevTable = selectedTable;
+      // Release all backend reservations before clearing
+      try {
+        (async () => {
+          const sectionId = currentSection;
+          const items = Array.isArray(cart) ? [...cart] : [];
+          for (const it of items) {
+            try { await api.inventory.adjustInSection({ productId: it.id, sectionId, delta: +Number(it.qty || 0), reason: `RESV|${reservationKey}|RELEASE` }); } catch {}
+          }
+        })();
+      } catch {}
       if (editingDraft && editingDraft.table) {
         updateTableStatus(editingDraft.table.id, 'available');
+      } else if (prevTable) {
+        updateTableStatus(prevTable.id, 'available');
       }
       setCart([]);
       setEditingDraft(null);
       setSelectedTable(null);
-      setCurrentService(serviceTypes[0]);
+      setCurrentService(serviceTypes[0] || '');
       setCurrentCustomer(customerTypes[0]);
     }
     if (action.type === 'void') {
@@ -296,19 +979,43 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       return;
     }
 
-    handlePrint('item-invoice', {
+    setPrintData({ type: 'item-invoice', data: {
       items: [{ ...item, qty: qtyToPrint }],
       table: selectedTable?.name,
       section: branchSections.find(s => s.id === currentSection)?.name,
-      user: user.username,
-      branch: user.branch,
-    });
+      serviceType: currentService,
+      user: user?.username || '',
+      branch: user?.branch || '',
+    }});
   };
 
   const handlePrintByCategory = (category) => {
-    const itemsInCategory = cart.filter(item => item.station === category);
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const key = norm(category);
+    // Robust matching: map common category names to destinations without changing stored data
+    const stationMatches = (station, targetKey) => {
+      const s = norm(station);
+      if (!s) return false;
+      if (targetKey === 'bar') {
+        return s.includes('bar') || s.includes('drink') || s.includes('beverage') || s.includes('wine') || s.includes('beer');
+      }
+      if (targetKey === 'grill') {
+        return s.includes('grill') || s.includes('grills') || s.includes('bbq') || s.includes('barbecue') || s.includes('suya') || s.includes('roast') || s.includes('kebab');
+      }
+      if (targetKey === 'kitchen') {
+        // Treat typical food categories as kitchen
+        return (
+          s.includes('kitchen') || s.includes('food') || s.includes('main') || s.includes('dish') || s.includes('soup') ||
+          s.includes('starter') || s.includes('salad') || s.includes('rice') || s.includes('noodle') || s.includes('sauce') || s.includes('meal')
+        ) && !stationMatches(station, 'grill'); // avoid misclassifying grills into kitchen
+      }
+      return s.includes(targetKey);
+    };
+
+    const itemsInCategory = cart.filter(item => stationMatches(item.station, key));
     if (itemsInCategory.length === 0) {
-        toast({ title: `No ${category.charAt(0).toUpperCase() + category.slice(1)} Items`, description: `There are no ${category} items in the cart to print.`, variant: "default" });
+        const nice = (category || '').charAt(0).toUpperCase() + String(category || '').slice(1);
+        toast({ title: `No ${nice} Items`, description: `There are no ${nice.toLowerCase()} items in the cart to print.`, variant: "default" });
         return;
     }
 
@@ -333,24 +1040,45 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       return;
     }
 
-    handlePrint('item-invoice', {
+    setPrintData({ type: 'item-invoice', data: {
         items: itemsToPrint,
         table: selectedTable?.name,
         section: branchSections.find(s => s.id === currentSection)?.name,
-        user: user.username,
-        branch: user.branch,
-    });
+        serviceType: currentService,
+        user: user?.username || '',
+        branch: user?.branch || '',
+    }});
     toast({ title: `${category.charAt(0).toUpperCase() + category.slice(1)} Order Sent`, description: `New items have been sent for production.` });
   };
 
-  const addToCart = (product) => {
+  const addToCart = async (product) => {
+    try {
+      const pid = String(product?.id || '');
+      if (!pid) return;
+      if (addingLockRef.current.has(pid)) {
+        try { console.debug('[POS] suppress duplicate addToCart', pid); } catch {}
+        return;
+      }
+      addingLockRef.current.add(pid);
+      setTimeout(() => { try { addingLockRef.current.delete(pid); } catch {} }, 400);
+    } catch {}
     if (!currentSection) {
       toast({ title: 'Section Required', description: 'Please select an operational section.', variant: 'destructive' });
       return;
     }
-    if (currentService === 'Dine-in' && !selectedTable) {
+    const isDineIn = /dine/i.test(String(currentService || '').trim());
+    if (isDineIn && !selectedTable) {
       toast({ title: 'Table Required', description: 'Please select a table for Dine-in orders.', variant: 'destructive' });
       return;
+    }
+    // For Dine-in: lock the table only when the first item is added
+    if (isDineIn && selectedTable && selectedTable.status !== 'occupied') {
+      const ok = await updateTableStatus(selectedTable.id, 'occupied');
+      if (!ok) {
+        toast({ title: `Could not lock ${selectedTable.name}`, description: 'Table might be in use. Please choose another table.', variant: 'destructive' });
+        return;
+      }
+      setSelectedTable(prev => prev ? { ...prev, status: 'occupied' } : prev);
     }
     
     const currentSectionName = branchSections.find(s => s.id === currentSection)?.name || '';
@@ -361,7 +1089,7 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
         return;
     }
 
-    const stock = (stockLevels[product.id]?.[currentSectionName] ?? stockLevels[product.id]?.['default'] ?? 0);
+    const stock = Number(stockLevels[product.id]?.[currentSectionName] ?? 0);
     const existingCartItem = cart.find(item => item.id === product.id);
     const currentCartQty = existingCartItem ? existingCartItem.qty : 0;
 
@@ -370,23 +1098,117 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
         return;
     }
 
+    // Reserve on backend first, tagged with this cart's reservationKey
+    try {
+      await api.inventory.adjustInSection({ productId: product.id, sectionId: currentSection, delta: -1, reason: `RESV|${reservationKey}` });
+    } catch (e) {
+      toast({ title: 'Stock not reserved', description: String(e?.message || 'Failed to reserve stock.'), variant: 'destructive' });
+      return;
+    }
+    try { adjustLocalSectionStock(product.id, -1); } catch {}
     setCart(prev => {
-      if (existingCartItem) {
-        return prev.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item);
-      }
+      if (existingCartItem) return prev.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item);
       return [...prev, { ...product, qty: 1, price, station: product.station }];
     });
+    // Refresh from backend (debounced) to get authoritative counts without clobbering optimistic UI
+    scheduleRefreshPricingAndStock(700);
   };
 
-  const updateQty = (id, delta) => {
+  const withinGrace = () => {
+    if (!lastOverrideAt || !graceSeconds) return false;
+    const diff = (Date.now() - lastOverrideAt);
+    return diff <= graceSeconds * 1000;
+  };
+
+  const requireOverride = (type, payload, onApproved) => {
+    if (!protectedActions.includes(type)) { onApproved?.(); return; }
+    // Bypass if user has permission
+    const perms = Array.isArray(user?.permissions) ? user.permissions : [];
+    if (hasPermission(perms, 'pos.override_bypass')) { onApproved?.(); return; }
+    // Grace window
+    if (withinGrace() && lastOverrideBy === user?.id) { onApproved?.(); return; }
+    setPendingOverride({ type, payload, onApproved });
+    setOverrideOpen(true);
+  };
+
+  // Open service staff PIN modal to verify selection
+  const requestSelectStaff = (staffId) => {
+    setPendingStaffId(staffId);
+    setServicePinModalOpen(true);
+  };
+
+  // Called by ServiceStaffPinModal with a PIN to verify for the pending staff selection
+  const handleVerifyServicePin = async (pin) => {
+    const staffId = pendingStaffId;
+    try {
+      if (!staffId) { throw new Error('No staff selected'); }
+      const res = await api.users.verifyPin({ userId: staffId, pin });
+      if (!res || res.ok !== true) { throw new Error('Invalid PIN'); }
+      setSelectedStaff(staffId);
+      const name = serviceStaffList.find(s => s.id === staffId)?.username;
+      if (name) toast({ title: 'Service staff selected', description: name });
+      // Close on success
+      setServicePinModalOpen(false);
+      setPendingStaffId(null);
+    } catch (e) {
+      toast({ title: 'Invalid service staff PIN', description: 'Please try again.', variant: 'destructive' });
+      return; // keep modal open for retry
+    }
+  };
+
+  const handleOverrideConfirm = async (pin) => {
+    try {
+      const sec = (branchSections || []).find(s => s.id === currentSection);
+      const resolvedBranchId = user?.branchId || user?.branch?.id || sec?.branchId || undefined;
+      const res = await api.hrm.overridePin.verify({ branchId: resolvedBranchId, pin });
+      if (!res || res.ok !== true) {
+        throw new Error('Invalid PIN');
+      }
+      const action = pendingOverride;
+      setOverrideOpen(false);
+      setPendingOverride(null);
+      setLastOverrideAt(Date.now());
+      setLastOverrideBy(user?.id || null);
+      if (typeof res.graceSeconds === 'number') setGraceSeconds(res.graceSeconds);
+      // Audit log
+      try {
+        await api.audit.log({
+          action: `override:${action?.type || 'unknown'}`,
+          userId: user?.id,
+          branchId: user?.branchId,
+          meta: { staffId: selectedStaff, time: new Date().toISOString(), payload: action?.payload }
+        });
+      } catch {}
+      // Success toast with staff/time
+      const staffName = serviceStaffList.find(s => s.id === selectedStaff)?.username || user?.username || '';
+      toast({ title: 'Override confirmed', description: `Override confirmed for ${staffName} at ${new Date().toLocaleString()}.` });
+      action?.onApproved?.();
+    } catch (e) {
+      toast({ title: 'Invalid override PIN. Action denied.', variant: 'destructive' });
+    }
+  };
+
+  const updateQty = async (id, delta) => {
     if (delta < 0) {
-      handlePinRequest({type: 'decrement', itemId: id});
-      return;
+      return requireOverride('decrement', { itemId: id }, async () => {
+        const item = cart.find(ci => ci.id === id);
+        if (!item) return;
+        // Backend-first restore to avoid double increments
+        try {
+          await api.inventory.adjustInSection({ productId: id, sectionId: currentSection, delta: +1, reason: `RESV|${reservationKey}` });
+        } catch (e) {
+          toast({ title: 'Stock restore failed', description: String(e?.message || 'Could not restore stock.'), variant: 'destructive' });
+          return;
+        }
+        try { adjustLocalSectionStock(id, +1); } catch {}
+        setCart(cart.map(ci => ci.id === id ? { ...ci, qty: Math.max(0, ci.qty - 1) } : ci).filter(ci => ci.qty > 0));
+        scheduleRefreshPricingAndStock(300);
+      });
     }
 
     const product = products.find(p => p.id === id);
     const currentSectionName = branchSections.find(s => s.id === currentSection)?.name || '';
-    const stock = (stockLevels[id]?.[currentSectionName] ?? stockLevels[id]?.['default'] ?? 0);
+    const stock = Number(stockLevels[id]?.[currentSectionName] ?? 0);
     const existingCartItem = cart.find(item => item.id === id);
     const currentCartQty = existingCartItem ? existingCartItem.qty : 0;
 
@@ -395,20 +1217,93 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
         return;
     }
 
-    setCart(cart.map(item => item.id === id ? {...item, qty: Math.max(0, item.qty + delta)} : item).filter(item => item.qty > 0));
+    // Backend-first reservation to ensure single depletion (tag with reservationKey)
+    try {
+      await api.inventory.adjustInSection({ productId: id, sectionId: currentSection, delta: -1, reason: `RESV|${reservationKey}` });
+    } catch (e) {
+      toast({ title: 'Stock not reserved', description: String(e?.message || 'Failed to reserve stock.'), variant: 'destructive' });
+      return;
+    }
+    try { adjustLocalSectionStock(id, -1); } catch {}
+    setCart(cart.map(item => item.id === id ? { ...item, qty: Math.max(0, item.qty + delta) } : item).filter(item => item.qty > 0));
+    scheduleRefreshPricingAndStock(300);
   };
-  
+
+  // Set quantity directly (used by editable input in the cart)
+  const setQty = async (id, targetQtyRaw) => {
+    try {
+      const targetQty = Math.max(0, Math.floor(Number(targetQtyRaw || 0)));
+      const existing = cart.find(ci => ci.id === id);
+      const currentQty = existing ? existing.qty : 0;
+      if (targetQty === currentQty) return;
+
+      const product = products.find(p => p.id === id);
+      const currentSectionName = branchSections.find(s => s.id === currentSection)?.name || '';
+      const stock = Number(stockLevels[id]?.[currentSectionName] ?? 0);
+      const delta = targetQty - currentQty;
+      if (delta > 0 && (stock < targetQty) && !allowOverselling) {
+        toast({ title: 'Stock Limit Reached', description: `${product?.name || 'Item'} only has ${stock} in stock.`, variant: 'destructive' });
+        return;
+      }
+      // Backend-first adjust to maintain reservation integrity
+      try {
+        if (delta > 0) {
+          await api.inventory.adjustInSection({ productId: id, sectionId: currentSection, delta: -delta, reason: `RESV|${reservationKey}` });
+          try { adjustLocalSectionStock(id, -delta); } catch {}
+        } else if (delta < 0) {
+          await api.inventory.adjustInSection({ productId: id, sectionId: currentSection, delta: +(-delta), reason: `RESV|${reservationKey}` });
+          try { adjustLocalSectionStock(id, +(-delta)); } catch {}
+        }
+      } catch (e) {
+        toast({ title: 'Quantity update failed', description: String(e?.message || e), variant: 'destructive' });
+        return;
+      }
+      // Update UI
+      setCart(prev => {
+        if (targetQty === 0) return prev.filter(ci => ci.id !== id);
+        if (existing) return prev.map(ci => ci.id === id ? { ...ci, qty: targetQty } : ci);
+        // If item not in cart and targetQty > 0, add it using product details
+        if (product) {
+          const sectionName = branchSections.find(s => s.id === currentSection)?.name || '';
+          const price = (sectionPrices[id]?.[sectionName] ?? product.price);
+          return [...prev, { ...product, qty: targetQty, price, station: product.station }];
+        }
+        return prev;
+      });
+      scheduleRefreshPricingAndStock(300);
+    } catch {}
+  };
+
   const handleVoid = (id) => {
-    handlePinRequest({type: 'void', itemId: id});
+    requireOverride('void', { itemId: id }, async () => {
+      const item = cart.find(ci => ci.id === id);
+      if (!item) return;
+      const qty = Number(item.qty || 0);
+      // Backend-first restore to avoid double increments
+      try {
+        await api.inventory.adjustInSection({ productId: id, sectionId: currentSection, delta: +qty, reason: `RESV|${reservationKey}` });
+      } catch (e) {
+        toast({ title: 'Stock restore failed', description: String(e?.message || 'Could not restore stock.'), variant: 'destructive' });
+        return;
+      }
+      try { adjustLocalSectionStock(id, +qty); } catch {}
+      setCart(cart.filter(ci => ci.id !== id));
+      scheduleRefreshPricingAndStock(300);
+    });
   }
 
-  const handleSaveDraft = () => {
+  const handleSaveDraft = async () => {
     if (cart.length === 0) {
       toast({ title: 'Empty Cart', description: 'Cannot save an empty cart as a draft.', variant: 'destructive' });
       return;
     }
+    if (!selectedStaff) {
+      toast({ title: 'Service staff required', description: 'Please select service staff before saving a draft.', variant: 'destructive' });
+      return;
+    }
     let updatedDrafts;
-    const draftTable = currentService === 'Dine-in' ? selectedTable : null;
+    const isDineInNow = /dine/i.test(String(currentService || '').trim());
+    const draftTable = isDineInNow ? selectedTable : null;
     const staffMember = serviceStaffList.find(s => s.id === selectedStaff);
     const draftData = {
         cart,
@@ -416,65 +1311,68 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
         customer: currentCustomer,
         table: draftTable,
         sectionId: currentSection,
-        waiter: staffMember ? staffMember.username : user.username,
+        waiter: staffMember ? staffMember.username : (user?.username || ''),
         waiterId: selectedStaff,
         discount: discount,
         taxRate: taxRate,
     };
     
-    // Update stock levels
-    const newStockLevels = JSON.parse(JSON.stringify(stockLevels));
-    const currentSectionName = branchSections.find(s => s.id === currentSection)?.name;
-    let stockUpdated = false;
-
     if (editingDraft) {
       updatedDrafts = drafts.map(d => d.id === editingDraft.id ? { ...d, ...draftData, updatedAt: new Date().toISOString() } : d);
       toast({ title: 'Draft Updated!', description: `Draft "${editingDraft.name}" has been updated.` });
-
-      // Calculate stock changes for updated draft
-      draftData.cart.forEach(newItem => {
-        const oldItem = editingDraft.cart.find(old => old.id === newItem.id);
-        const qtyChange = newItem.qty - (oldItem ? oldItem.qty : 0);
-        if (newStockLevels[newItem.id] && newStockLevels[newItem.id][currentSectionName] !== undefined && qtyChange !== 0) {
-            newStockLevels[newItem.id][currentSectionName] -= qtyChange;
-            stockUpdated = true;
-        }
-      });
-      editingDraft.cart.forEach(oldItem => {
-          if (!draftData.cart.some(newItem => newItem.id === oldItem.id)) {
-              // Item removed from cart
-              if (newStockLevels[oldItem.id] && newStockLevels[oldItem.id][currentSectionName] !== undefined) {
-                  newStockLevels[oldItem.id][currentSectionName] += oldItem.qty;
-                  stockUpdated = true;
-              }
-          }
-      });
-
     } else {
       const draftName = `Draft #${drafts.length + 1}`;
       const newDraft = { id: Date.now(), name: draftName, ...draftData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       updatedDrafts = [...drafts, newDraft];
       toast({ title: 'Draft Saved!', description: `"${draftName}" has been saved.` });
-      
-      // Deplete stock for new draft
-      cart.forEach(item => {
-        if (newStockLevels[item.id] && newStockLevels[item.id][currentSectionName] !== undefined) {
-          newStockLevels[item.id][currentSectionName] -= item.qty;
-          stockUpdated = true;
-        }
-      });
-    }
-
-    if (stockUpdated) {
-        setStockLevels(newStockLevels);
-        localStorage.setItem('loungeStockLevels', JSON.stringify(newStockLevels));
     }
     
     setDrafts(updatedDrafts);
-    localStorage.setItem('loungeDrafts', JSON.stringify(updatedDrafts));
+    // Persist to backend (create or update)
+    (async () => {
+      try {
+        const nameToUse = editingDraft ? editingDraft.name : updatedDrafts[updatedDrafts.length - 1].name;
+        const backendId = editingDraft?.backendId;
+        const payload = {
+          branchId: (user?.branchId || user?.branch?.id || (branchSections.find(s => s.id === currentSection)?.branchId) || undefined),
+          sectionId: currentSection,
+          tableId: draftTable?.id,
+          name: nameToUse,
+          serviceType: currentService,
+          waiterId: selectedStaff || undefined,
+          customerName: currentCustomer,
+          customerPhone: undefined,
+          cart,
+          subtotal: Number(subtotal),
+          discount: Number(discountValue),
+          tax: Number(tax),
+          total: Number(total),
+          status: 'ACTIVE',
+        };
+        if (backendId) {
+          await api.drafts.update(backendId, payload);
+        } else {
+          const created = await api.drafts.create(payload);
+          if (created?.id) {
+            setDrafts(prev => prev.map(d => (d.name === nameToUse && !d.backendId) ? { ...d, backendId: created.id, id: created.id } : d));
+          }
+        }
+      } catch {}
+    })();
     
     if (draftTable) {
-      updateTableStatus(draftTable.id, 'occupied');
+      const t = tables.find(t => t.id === draftTable.id);
+      if (!t || t.status !== 'occupied') {
+        const ok = await updateTableStatus(draftTable.id, 'occupied');
+        if (!ok) {
+          toast({ title: `Could not lock ${draftTable.name}`, description: 'Table might be in use. Please choose another table.', variant: 'destructive' });
+        }
+        // Reflect in local UI immediately
+        if (ok) {
+          setSelectedTable(prev => prev && prev.id === draftTable.id ? { ...prev, status: 'occupied' } : prev);
+          setTables(prev => prev.map(tt => tt.id === draftTable.id ? { ...tt, status: 'occupied' } : tt));
+        }
+      }
     }
 
     handlePrint('table-bill', {
@@ -485,7 +1383,7 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       tax,
       total,
       waiter: draftData.waiter,
-      branch: user.branch,
+      branch: user?.branch || '',
       section: branchSections.find(s => s.id === currentSection)?.name,
       isDraft: true,
     });
@@ -493,33 +1391,52 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
     setCart([]);
     setEditingDraft(null);
     setSelectedTable(null);
-    setCurrentService(serviceTypes[0]);
+    setCurrentService(serviceTypes[0] || defaultServiceTypes[0]);
     setCurrentCustomer(customerTypes[0]);
     setDiscount({ type: 'percentage', value: 0 });
+    try { await fetchDrafts(draftsPage); } catch {}
   };
 
-  const handleLoadDraft = (draft) => {
-    setCart(draft.cart);
-    setCurrentService(draft.service || serviceTypes[0]);
-    setCurrentCustomer(draft.customer || customerTypes[0]);
-    if (draft.table) {
-      const tableExists = tables.find(t => t.id === draft.table.id);
-      setSelectedTable(tableExists ? draft.table : null);
-    } else {
-      setSelectedTable(null);
-    }
-    setCurrentSection(draft.sectionId || currentSection);
-    setSelectedStaff(draft.waiterId || null);
+  const handleLoadDraft = async (draft) => {
+    let next = { ...draft };
+    try {
+      const isSusp = !!(draft.isSuspended || String(draft.status || '').toUpperCase() === 'SUSPENDED');
+      const needsFetch = isSusp || !Array.isArray(draft.cart) || draft.cart.length === 0;
+      const backendId = draft.backendId || draft.id;
+      if (needsFetch && backendId && api?.drafts?.get) {
+        const fresh = await api.drafts.get(String(backendId));
+        if (fresh && Array.isArray(fresh.cart) && fresh.cart.length > 0) {
+          next = {
+            ...next,
+            cart: fresh.cart,
+            service: fresh.serviceType || next.service,
+            customer: fresh.customerName || next.customer,
+            table: fresh.tableId ? (tables.find(t => t.id === fresh.tableId) || next.table) : next.table,
+            total: Number(fresh.total || next.total || 0),
+            isSuspended: String(fresh.status || next.status || '').toUpperCase() === 'SUSPENDED',
+            waiterId: fresh.waiterId || next.waiterId,
+          };
+        }
+      }
+    } catch {}
+    setCart(Array.isArray(next.cart) ? next.cart : []);
+    setCurrentService(next.service || serviceTypes[0] || '');
+    setCurrentCustomer(next.customer || customerTypes[0]);
+    setSelectedTable(next.table || null);
+    setSelectedStaff(next.waiterId || null);
+    setEditingDraft(next);
+    // Adopt reservation key from draft so subsequent reservations use the same key
+    if (next.reservationKey) setReservationKey(next.reservationKey);
+    toast({ title: 'Draft Loaded', description: `Draft "${next.name || 'Draft'}" is ready in the POS.` });
     setDiscount(draft.discount || { type: 'percentage', value: 0 });
     setTaxRate(draft.taxRate || 10);
-    setEditingDraft(draft);
     setIsDraftsOpen(false);
-    toast({ title: 'Draft Loaded', description: `Now editing "${draft.name}".` });
+    
   };
 
-  const handleDeleteDraft = (draftId, pinVerified = false) => {
+  const handleDeleteDraft = async (draftId, pinVerified = false) => {
     if (!pinVerified) {
-      handlePinRequest({ type: 'delete_draft', draftId: draftId });
+      requireOverride('delete_draft', { draftId }, () => handleDeleteDraft(draftId, true));
       return;
     }
     
@@ -540,126 +1457,366 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
     }
 
     if (draftToDelete.table) {
-      updateTableStatus(draftToDelete.table.id, 'available');
+      try { await updateTableStatus(draftToDelete.table.id, 'available'); } catch {}
     }
 
     const updatedDrafts = drafts.filter(d => d.id !== draftId);
     setDrafts(updatedDrafts);
-    localStorage.setItem('loungeDrafts', JSON.stringify(updatedDrafts));
     toast({ title: 'Draft Deleted', description: 'The saved order has been removed and stock restored.' });
+    // Restore in backend inventory and delete draft
+    (async () => {
+      try {
+        const sectionId = draftToDelete.sectionId || currentSection;
+        for (const it of draftToDelete.cart) {
+          try { await api.inventory.adjustInSection({ productId: it.id, sectionId, delta: +Number(it.qty || 0) }); } catch {}
+        }
+      } catch {}
+      try { const b = draftToDelete.backendId || draftToDelete.id; if (b) await api.drafts.remove(String(b)); await fetchDrafts(draftsPage); } catch {}
+    })();
   };
 
   const handleTakePayment = (mode) => {
     if (cart.length === 0) {
-        toast({ title: 'Empty Cart', description: 'Cannot proceed to payment with an empty cart.', variant: 'destructive' });
-        return;
+      toast({ title: 'Empty Cart', description: 'Cannot proceed to payment with an empty cart.', variant: 'destructive' });
+      return;
+    }
+    if (!hasAny(userPermissions, ['add_pos_sell', 'add_payment'])) {
+      toast({ title: 'Not allowed', description: 'You do not have permission to accept payments.', variant: 'destructive' });
+      return;
+    }
+    if (!selectedStaff) {
+      toast({ title: 'Service staff required', description: 'Please select service staff before taking payment.', variant: 'destructive' });
+      return;
     }
     setPaymentMode(mode);
     setPaymentModalOpen(true);
   };
   
-  const handlePaymentSuccess = async (paymentDetails) => {
-    const staffMember = serviceStaffList.find(s => s.id === selectedStaff);
-    const waiterName = editingDraft ? editingDraft.waiter : (staffMember ? staffMember.username : user.username);
-    const savedBranches = JSON.parse(localStorage.getItem('loungeBranches') || '[]');
-    const currentBranch = savedBranches.find(b => b.id.toString() === user.branchId.toString());
+  const handlePaymentSuccess = async (paymentDetails, skipOverride = false) => {
+    try {
+      // Normalize
+      paymentDetails = paymentDetails || { method: paymentMode };
+      if (paymentDetails && typeof paymentDetails === 'object' && !paymentDetails.method) {
+        paymentDetails.method = paymentMode;
+      }
 
-    const saleData = {
-      items: cart,
-      table: selectedTable?.name,
-      subtotal,
-      discount: discountValue,
-      tax,
-      total,
-      paymentDetails,
-      waiter: waiterName,
-      cashier: user.username,
-      branch: currentBranch,
-      section: branchSections.find(s => s.id === currentSection)?.name,
-      serviceType: currentService,
-      id: Date.now(),
-      isReceipt: true,
-    };
+      // Override for credit-sale
+      if (!skipOverride && paymentDetails?.method === 'credit sale' && protectedActions.includes('approve_credit_sale') && !pendingCreditSale) {
+        const captured = paymentDetails;
+        setPendingCreditSale(captured);
+        requireOverride('approve_credit_sale', {}, async () => {
+          const details = pendingCreditSale || captured;
+          setPendingCreditSale(null);
+          await handlePaymentSuccess(details, true);
+          setOverrideOpen(false);
+          setPaymentModalOpen(false);
+          try { await fetchDrafts(draftsPage); } catch {}
+        });
+        return;
+      }
 
-    if (paymentDetails.method === 'credit sale') {
+      const staffMember = serviceStaffList.find(s => s.id === selectedStaff);
+      const waiterName = (staffMember && staffMember.username)
+        || (editingDraft && editingDraft.waiter)
+        || (user?.username || '');
+
+      const saleData = {
+        items: cart,
+        table: selectedTable?.name,
+        subtotal,
+        discount: discountValue,
+        tax,
+        total,
+        taxRate,
+        paymentDetails,
+        waiter: waiterName,
+        cashier: user?.username || '',
+        branch: { id: user?.branchId },
+        section: branchSections.find(s => s.id === currentSection)?.name,
+        serviceType: currentService,
+        id: Date.now(),
+        isReceipt: true,
+      };
+
+      // Credit sale -> create SUSPENDED order, link draft to orderId, then return
+      if (paymentDetails?.method === 'credit sale') {
         const draftTable = currentService === 'Dine-in' ? selectedTable : null;
-        const draftData = {
-            cart,
-            service: currentService,
-            customer: paymentDetails.customer.name,
-            customerDetails: paymentDetails.customer,
-            table: draftTable,
-            sectionId: currentSection,
-            total: total,
-            waiter: waiterName,
-            waiterId: selectedStaff,
-            discount: discount,
-            taxRate: taxRate,
-        };
-
+        const customerName = paymentDetails?.customer?.name || 'Walk-in';
+        const customerPhone = paymentDetails?.customer?.phone || null;
+        const draftData = { cart, service: currentService, customer: customerName, customerDetails: paymentDetails?.customer || { name: customerName, phone: customerPhone }, table: draftTable, sectionId: currentSection, total, waiter: waiterName, waiterId: selectedStaff, discount, taxRate };
         let updatedDrafts;
+        let createdSuspendedOrder = null;
+        try {
+          createdSuspendedOrder = await api.orders.create({
+            branchId: user.branchId,
+            sectionId: currentSection,
+            items: cart.map(ci => ({ productId: ci.id, qty: String(ci.qty), price: String(ci.price ?? 0) })),
+            reservationKey,
+            allowOverselling,
+            tableId: draftTable?.id,
+            status: 'SUSPENDED',
+          });
+        } catch (e) {
+          const msg = e?.message || e;
+          toast({ title: 'Credit sale failed to start', description: String(msg), variant: 'destructive' });
+          return;
+        }
         if (editingDraft) {
-            updatedDrafts = drafts.map(d => d.id === editingDraft.id ? { ...d, ...draftData, isSuspended: true, updatedAt: new Date().toISOString() } : d);
-            toast({ title: 'Bill Suspended!', description: `Bill for "${editingDraft.name}" has been moved to credit.` });
+          updatedDrafts = drafts.map(d => d.id === editingDraft.id ? { ...d, ...draftData, orderId: (createdSuspendedOrder?.id || d.orderId || null), isSuspended: true, updatedAt: new Date().toISOString() } : d);
+          toast({ title: 'Bill Suspended!', description: `Bill for "${editingDraft.name}" has been moved to credit.` });
         } else {
-            const draftName = `Suspended: ${paymentDetails.customer.name}`;
-            const newDraft = { id: Date.now(), name: draftName, ...draftData, isSuspended: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-            updatedDrafts = [...drafts, newDraft];
-            toast({ title: 'Bill Suspended!', description: `"${draftName}" has been saved to pay later.` });
+          const draftName = `Suspended: ${customerName}`;
+          const newDraft = { id: Date.now(), name: draftName, ...draftData, orderId: createdSuspendedOrder?.id || null, isSuspended: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+          updatedDrafts = [...drafts, newDraft];
+          toast({ title: 'Bill Suspended!', description: `"${draftName}" has been saved to pay later.` });
         }
         setDrafts(updatedDrafts);
-        localStorage.setItem('loungeDrafts', JSON.stringify(updatedDrafts));
-
-        if (draftTable) {
-            updateTableStatus(draftTable.id, 'available');
-        }
-    } else {
-        // Create order in backend (handles stock decrement)
         try {
-          await api.orders.create({
-            branchId: user.branchId,
-            items: cart.map((ci) => ({ productId: ci.id, qty: ci.qty, price: String(ci.price ?? 0) })),
-            payment: { method: String(paymentDetails.method || paymentMode), amount: String(total), reference: paymentDetails?.reference || undefined },
-          });
-          toast({ title: "Payment Successful!", description: "Order has been processed." });
-        } catch (e) {
-          toast({ title: 'Order save failed', description: String(e?.message || e), variant: 'destructive' });
-        }
+          const sec = (branchSections || []).find(s => s.id === currentSection);
+          const resolvedBranchId = user?.branchId || user?.branch?.id || sec?.branchId || undefined;
+          const draftName = editingDraft ? editingDraft.name : `Suspended: ${customerName}`;
+          const payload = { branchId: resolvedBranchId, sectionId: currentSection, tableId: draftTable?.id, orderId: createdSuspendedOrder?.id, name: draftName, serviceType: currentService, waiterId: selectedStaff || undefined, customerName, customerPhone, cart, subtotal: Number(subtotal), discount: Number(discountValue), tax: Number(tax), total: Number(total), status: 'SUSPENDED', reservationKey };
+          if (editingDraft?.backendId) { await api.drafts.update(String(editingDraft.backendId), payload); } else { await api.drafts.create(payload); }
+          await fetchDrafts(draftsPage);
+        } catch {}
+        // If an order was previously created in this session and tied to the table, mark it SUSPENDED to auto-release (best-effort, guarded)
+        try { if (recentSales?.[0]?.orderId) { await api.orders.updateStatus(String(recentSales[0].orderId), { status: 'SUSPENDED' }); } } catch {}
+        // recent sales entry for credit
+        try { setRecentSales(prev => [{ ...saleData, paymentDetails: { method: 'credit sale' } }, ...prev].slice(0,50)); } catch {}
+        // clear and unlock
+        setPaymentModalOpen(false);
+        setCart([]);
+        setEditingDraft(null);
+        setSelectedTable(null);
+        setDiscount({ type: 'percentage', value: 0 });
+        if (draftTable) { try { await updateTableStatus(draftTable.id, 'available'); } catch {} }
+        try { if (currentSection) { const rows = await api.tables.list({ sectionId: currentSection }); setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, sectionId: t.sectionId || t.section?.id || t.section, sectionName: t.section?.name || '', status: ((String(t.status || '').toLowerCase() === 'locked') || (String(t.status || '').toLowerCase() === 'occupied') || !!t.locked) ? 'occupied' : 'available', updatedAt: t.updatedAt || t.updated_at || null, }))); } } catch {}
+        try { await refreshPricingAndStock(); } catch {}
+        return;
+      }
 
-        if (editingDraft) {
-          if (editingDraft.table) {
-            updateTableStatus(editingDraft.table.id, 'available');
+      // Settlement or Normal sale
+      let receiptData = null;
+      try {
+        if (!hasAny(userPermissions, ['add_pos_sell', 'add_payment'])) {
+          toast({ title: 'Not allowed', description: 'You do not have permission to accept payments.', variant: 'destructive' });
+          return;
+        }
+        let createdOrder = null;
+        if (editingDraft?.isSuspended && (editingDraft?.orderId || editingDraft?.backendId)) {
+          const orderId = editingDraft.orderId || null;
+          if (orderId) {
+            // If split payment, add multiple entries; else single entry
+            if (String(paymentDetails?.method || '').toLowerCase() === 'multiple') {
+              const src = paymentDetails || {};
+              const details = src.details || {};
+              // fallback to flat fields or entries
+              let cash = Number(details.cash ?? src.cash ?? 0);
+              let card = Number(details.card ?? src.card ?? src.pos ?? 0);
+              let bank = Number(details.bank ?? src.bank ?? src.transfer ?? 0);
+              const entries = src.entries || src.payments;
+              if (Array.isArray(entries)) {
+                cash = cash || entries.filter(e => String(e.method||'').toLowerCase().includes('cash')).reduce((a,b)=>a+Number(b.amount||0),0);
+                card = card || entries.filter(e => /card|pos/i.test(String(e.method||''))).reduce((a,b)=>a+Number(b.amount||0),0);
+                bank = bank || entries.filter(e => !(String(e.method||'').toLowerCase().includes('cash') || /card|pos/i.test(String(e.method||'')))).reduce((a,b)=>a+Number(b.amount||0),0);
+              }
+              if (cash > 0) await api.orders.addPayment(String(orderId), { method: 'cash', amount: String(cash) });
+              if (card > 0) await api.orders.addPayment(String(orderId), { method: 'card', amount: String(card) });
+              if (bank > 0) await api.orders.addPayment(String(orderId), { method: 'bank', amount: String(bank) });
+            } else {
+              await api.orders.addPayment(String(orderId), { method: String(paymentDetails?.method || paymentMode), amount: String(total), reference: paymentDetails?.reference || undefined });
+            }
+            await api.orders.updateStatus(String(orderId), { status: 'PAID' });
+            createdOrder = { id: orderId };
+          } else {
+            // Legacy fallback: create + mark paid
+            const isSplit = String(paymentDetails?.method || '').toLowerCase() === 'multiple';
+            createdOrder = await api.orders.create({ branchId: user.branchId, sectionId: currentSection, items: cart.map(ci => ({ productId: ci.id, qty: String(ci.qty), price: String(ci.price ?? 0) })), payment: isSplit ? undefined : { method: String(paymentDetails?.method || paymentMode), amount: String(total), reference: paymentDetails?.reference || undefined }, allowOverselling, tableId: selectedTable?.id, status: 'ACTIVE', reservationKey, serviceType: currentService, waiterId: selectedStaff || undefined, subtotal: String(subtotal), discount: String(discountValue), tax: String(tax), total: String(total), taxRate: String(taxRate ?? 0) });
+            if (createdOrder?.id && isSplit) {
+              const src = paymentDetails || {};
+              const details = src.details || {};
+              let cash = Number(details.cash ?? src.cash ?? 0);
+              let card = Number(details.card ?? src.card ?? src.pos ?? 0);
+              let bank = Number(details.bank ?? src.bank ?? src.transfer ?? 0);
+              const entries = src.entries || src.payments;
+              if (Array.isArray(entries)) {
+                cash = cash || entries.filter(e => String(e.method||'').toLowerCase().includes('cash')).reduce((a,b)=>a+Number(b.amount||0),0);
+                card = card || entries.filter(e => /card|pos/i.test(String(e.method||''))).reduce((a,b)=>a+Number(b.amount||0),0);
+                bank = bank || entries.filter(e => !(String(e.method||'').toLowerCase().includes('cash') || /card|pos/i.test(String(e.method||'')))).reduce((a,b)=>a+Number(b.amount||0),0);
+              }
+              if (cash > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'cash', amount: String(cash) });
+              if (card > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'card', amount: String(card) });
+              if (bank > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'bank', amount: String(bank) });
+            }
+            try { if (createdOrder?.id) await api.orders.updateStatus(String(createdOrder.id), { status: 'PAID' }); } catch {}
           }
-          const updatedDrafts = drafts.filter(d => d.id !== editingDraft.id);
-          setDrafts(updatedDrafts);
-          localStorage.setItem('loungeDrafts', JSON.stringify(updatedDrafts));
-        } else if (selectedTable) {
-          updateTableStatus(selectedTable.id, 'available');
+          // Fetch backend order for printing
+          try {
+            const id = editingDraft?.orderId;
+            if (id) {
+              const ord = await api.orders.get(String(id));
+              if (ord) {
+                const payments = Array.isArray(ord.payments) ? ord.payments : [];
+                let paymentDetailsResolved = null;
+                if (payments.length === 1) {
+                  const singleMethod = String(payments[0].method || '').toLowerCase();
+                  if (singleMethod !== 'multiple') {
+                    paymentDetailsResolved = { method: singleMethod, received: Number(payments[0].amount || 0), change: 0 };
+                  } // if 'multiple', keep undefined so we fall back to POS-captured breakdown
+                } else if (payments.length > 1) {
+                  const details = { cash: 0, card: 0, bank: 0 };
+                  payments.forEach(p => {
+                    const m = String(p.method || '').toLowerCase();
+                    const amt = Number(p.amount || 0);
+                    if (m.includes('cash')) details.cash += amt; else if (m.includes('card') || m.includes('pos')) details.card += amt; else details.bank += amt;
+                  });
+                  paymentDetailsResolved = { method: 'multiple', details };
+                }
+                receiptData = {
+                  id: ord.displayInvoice || ord.invoice_no || ord.invoiceNo || ord.receiptNo || ord.orderNumber || ord.id,
+                  items: (ord.items || []).map(it => ({
+                    id: it.productId || it.product?.id || it.id,
+                    name: it.product?.name || it.productName || String(it.productId || ''),
+                    qty: Number(it.qty || it.quantity || 0),
+                    price: Number(it.price || 0),
+                  })),
+                  table: ord.table?.name || ord.tableName || saleData.table || selectedTable?.name || undefined,
+                  subtotal: Number(ord.subtotal || saleData.subtotal || 0),
+                  discount: Number(ord.discount || saleData.discount || 0),
+                  tax: Number(ord.tax || saleData.tax || 0),
+                  total: Number(ord.total || saleData.total || 0),
+                  taxRate: Number(ord.taxRate || saleData.taxRate || taxRate || 0),
+                  paymentDetails: paymentDetailsResolved || saleData.paymentDetails || undefined,
+                  waiter: ord.waiter?.name || ord.waiterName || (serviceStaffList.find(s => s.id === selectedStaff)?.username) || (editingDraft?.waiter) || undefined,
+                  cashier: user?.username || '',
+                  branch: user?.branch || '',
+                  section: ord.section?.name || undefined,
+                  serviceType: ord.serviceType || currentService || undefined,
+                  isReceipt: true,
+                };
+              }
+            }
+          } catch {}
+          toast({ title: 'Payment Successful!', description: 'Suspended bill settled.' });
+          try { window.dispatchEvent(new CustomEvent('reports:refresh', { detail: { branchId: user?.branchId } })); } catch {}
+          try { window.dispatchEvent(new CustomEvent('orders:changed', { detail: { action: 'settled', orderId: editingDraft?.orderId || null } })); } catch {}
+        } else {
+          const isSplit = String(paymentDetails?.method || '').toLowerCase() === 'multiple';
+          createdOrder = await api.orders.create({ branchId: user.branchId, sectionId: currentSection, items: cart.map(ci => ({ productId: ci.id, qty: String(ci.qty), price: String(ci.price ?? 0) })), payment: isSplit ? undefined : { method: String(paymentDetails?.method || paymentMode), amount: String(total), reference: paymentDetails?.reference || undefined }, allowOverselling, tableId: selectedTable?.id, status: 'ACTIVE', serviceType: currentService, waiterId: selectedStaff || undefined, subtotal: String(subtotal), discount: String(discountValue), tax: String(tax), total: String(total), taxRate: String(taxRate ?? 0) });
+          if (createdOrder?.id && isSplit) {
+            const src = paymentDetails || {};
+            const details = src.details || {};
+            let cash = Number(details.cash ?? src.cash ?? 0);
+            let card = Number(details.card ?? src.card ?? src.pos ?? 0);
+            let bank = Number(details.bank ?? src.bank ?? src.transfer ?? 0);
+            const entries = src.entries || src.payments;
+            if (Array.isArray(entries)) {
+              cash = cash || entries.filter(e => String(e.method||'').toLowerCase().includes('cash')).reduce((a,b)=>a+Number(b.amount||0),0);
+              card = card || entries.filter(e => /card|pos/i.test(String(e.method||''))).reduce((a,b)=>a+Number(b.amount||0),0);
+              bank = bank || entries.filter(e => !(String(e.method||'').toLowerCase().includes('cash') || /card|pos/i.test(String(e.method||'')))).reduce((a,b)=>a+Number(b.amount||0),0);
+            }
+            if (cash > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'cash', amount: String(cash) });
+            if (card > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'card', amount: String(card) });
+            if (bank > 0) await api.orders.addPayment(String(createdOrder.id), { method: 'bank', amount: String(bank) });
+          }
+          // Fetch backend order for printing
+          try {
+            if (createdOrder?.id) {
+              const ord = await api.orders.get(String(createdOrder.id));
+              if (ord) {
+                const payments = Array.isArray(ord.payments) ? ord.payments : [];
+                let paymentDetailsResolved = null;
+                if (payments.length === 1) {
+                  paymentDetailsResolved = { method: String(payments[0].method || '').toLowerCase(), received: Number(payments[0].amount || 0), change: 0 };
+                } else if (payments.length > 1) {
+                  const details = { cash: 0, card: 0, bank: 0 };
+                  payments.forEach(p => {
+                    const m = String(p.method || '').toLowerCase();
+                    const amt = Number(p.amount || 0);
+                    if (m.includes('cash')) details.cash += amt; else if (m.includes('card') || m.includes('pos')) details.card += amt; else details.bank += amt;
+                  });
+                  paymentDetailsResolved = { method: 'multiple', details };
+                }
+                receiptData = {
+                  id: ord.displayInvoice || ord.invoice_no || ord.invoiceNo || ord.receiptNo || ord.orderNumber || ord.id,
+                  items: (ord.items || []).map(it => ({
+                    id: it.productId || it.product?.id || it.id,
+                    name: it.product?.name || it.productName || String(it.productId || ''),
+                    qty: Number(it.qty || it.quantity || 0),
+                    price: Number(it.price || 0),
+                  })),
+                  table: ord.table?.name || ord.tableName || saleData.table || selectedTable?.name || undefined,
+                  subtotal: Number(ord.subtotal || saleData.subtotal || 0),
+                  discount: Number(ord.discount || saleData.discount || 0),
+                  tax: Number(ord.tax || saleData.tax || 0),
+                  total: Number(ord.total || saleData.total || 0),
+                  taxRate: Number(ord.taxRate || saleData.taxRate || taxRate || 0),
+                  paymentDetails: paymentDetailsResolved || saleData.paymentDetails || undefined,
+                  waiter: ord.waiter?.name || ord.waiterName || (serviceStaffList.find(s => s.id === selectedStaff)?.username) || (editingDraft?.waiter) || undefined,
+                  cashier: user?.username || '',
+                  branch: user?.branch || '',
+                  section: ord.section?.name || undefined,
+                  serviceType: ord.serviceType || currentService || undefined,
+                  isReceipt: true,
+                };
+              }
+            }
+          } catch {}
+          toast({ title: 'Payment Successful!', description: 'Order has been processed.' });
+          // Mark order as PAID so table auto-releases (status-driven backend)
+          try { if (createdOrder?.id) await api.orders.updateStatus(String(createdOrder.id), { status: 'PAID' }); } catch {}
+          try { window.dispatchEvent(new CustomEvent('reports:refresh', { detail: { branchId: user?.branchId } })); } catch {}
+          try { window.dispatchEvent(new CustomEvent('orders:changed', { detail: { action: 'created', orderId: createdOrder?.id || null } })); } catch {}
         }
-        
-        const updatedRecentSales = [saleData, ...recentSales].slice(0, 50); // Keep last 50 sales
-        setRecentSales(updatedRecentSales);
-        localStorage.setItem('loungeRecentSales', JSON.stringify(updatedRecentSales));
+        try { const rows = await api.inventory.listBySection({ sectionId: currentSection, autoRelease: true }); const secName = branchSections.find(s => s.id === currentSection)?.name || ''; if (secName) { setStockLevels(prev => { const next = { ...prev }; const byProduct = {}; (rows || []).forEach(r => { byProduct[r.productId] = Number(r.qtyOnHand || 0); }); Object.keys(byProduct).forEach(pid => { next[pid] = next[pid] || {}; next[pid][secName] = byProduct[pid]; }); return next; }); } } catch {}
+        if (createdOrder) saleData.id = createdOrder.displayInvoice || createdOrder.invoice_no || createdOrder.invoiceNo || createdOrder.receiptNo || createdOrder.orderNumber || createdOrder.id;
+      } catch (e) {
+        const msg = e?.message || e; toast({ title: 'Order save failed', description: String(msg), variant: 'destructive' }); return;
+      }
 
-        handlePrint('final-receipt', saleData);
+      if (editingDraft) {
+        try { if (editingDraft.table) await updateTableStatus(editingDraft.table.id, 'available'); } catch {}
+        setDrafts(drafts.filter(d => d.id !== editingDraft.id));
+        try { const backendId = editingDraft.backendId || editingDraft.id; if (backendId) await api.drafts.remove(String(backendId)); await fetchDrafts(draftsPage); } catch {}
+      } else if (selectedTable) {
+        try { await updateTableStatus(selectedTable.id, 'available'); } catch {}
+      }
+
+      try { if (currentSection) { const rows = await api.tables.list({ sectionId: currentSection }); setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, sectionId: t.sectionId || t.section?.id || t.section, sectionName: t.section?.name || '', status: ((String(t.status || '').toLowerCase() === 'locked') || (String(t.status || '').toLowerCase() === 'occupied') || !!t.locked) ? 'occupied' : 'available', updatedAt: t.updatedAt || t.updated_at || null, }))); } } catch {}
+
+      setRecentSales([receiptData || saleData, ...recentSales].slice(0, 50));
+      setPaymentModalOpen(false);
+      setTimeout(() => { setPrintData({ type: 'final-receipt', data: receiptData || saleData }); }, 200);
+      // If we were finalizing a suspended bill, keep the cart visible with the order items
+      if (editingDraft?.isSuspended) {
+        setEditingDraft(null);
+        setSelectedTable(null);
+        setDiscount({ type: 'percentage', value: 0 });
+      } else {
+        setCart([]);
+        setEditingDraft(null);
+        setSelectedTable(null);
+        setDiscount({ type: 'percentage', value: 0 });
+      }
+      try { const freedId = (editingDraft && editingDraft.table ? editingDraft.table.id : (selectedTable ? selectedTable.id : null)); if (freedId) setTables(prev => prev.map(t => t.id === freedId ? { ...t, status: 'available' } : t)); } catch {}
+      try { if (currentSection) { const rows = await api.tables.list({ sectionId: currentSection }); setTables((rows || []).map(t => ({ id: t.id, name: t.name || t.code || t.id, sectionId: t.sectionId || t.section?.id || t.section, sectionName: t.section?.name || '', status: ((String(t.status || '').toLowerCase() === 'locked') || (String(t.status || '').toLowerCase() === 'occupied') || !!t.locked) ? 'occupied' : 'available', }))); } } catch {}
+
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPaymentModalOpen(false);
     }
-
-    setCart([]);
-    setEditingDraft(null);
-    setSelectedTable(null); 
-    setPaymentModalOpen(false);
-    setDiscount({ type: 'percentage', value: 0 });
   };
 
   const handleCashDrawerAction = (details) => {
     console.log("Cash drawer action:", details);
-    toast({ title: "Cash Drawer Updated", description: `${details.type === 'in' ? 'Added' : 'Removed'} ${details.amount.toFixed(2)}` });
+    toast({ title: "Cash Drawer Updated", description: `${details.type === 'in' ? 'Added' : 'Removed'} ${fmt(details.amount)}` });
     setCashDrawerModalOpen(false);
   };
 
   const handleCardTerminalAction = (details) => {
     console.log("Card terminal action:", details);
-    toast({ title: "Card terminal action:", description: `Processed ${details.type} for ${details.amount.toFixed(2)}` });
+    toast({ title: "Card terminal action:", description: `Processed ${details.type} for ${fmt(details.amount)}` });
     setCardTerminalModalOpen(false);
   };
 
@@ -669,10 +1826,9 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       return;
     }
     const staffMember = serviceStaffList.find(s => s.id === selectedStaff);
-    const waiterName = editingDraft?.waiter || (staffMember ? staffMember.username : user.username);
-
-    const savedBranches = JSON.parse(localStorage.getItem('loungeBranches') || '[]');
-    const currentBranch = savedBranches.find(b => b.id.toString() === user.branchId.toString());
+    const waiterName = (staffMember && staffMember.username)
+      || (editingDraft && editingDraft.waiter)
+      || (user?.username || '');
 
     handlePrint('table-bill', {
       items: cart,
@@ -681,12 +1837,51 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
       discount: discountValue,
       tax,
       total,
+      taxRate,
       waiter: waiterName,
-      cashier: user.username,
-      branch: currentBranch,
+      cashier: user?.username || '',
+      branch: user?.branch || '',
       section: branchSections.find(s => s.id === currentSection)?.name,
+      serviceType: currentService,
       isDraft: false,
     });
+  };
+
+  const handleReprint = async (sale) => {
+    try {
+      const id = sale?.id || sale?.orderId;
+      if (!id) {
+        setPrintData({ type: 'final-receipt', data: sale });
+        return;
+      }
+      const ord = await api.orders.get(String(id));
+      if (ord) {
+        const receiptData = {
+          id: ord.displayInvoice || ord.invoice_no || ord.invoiceNo || ord.receiptNo || ord.orderNumber || ord.id,
+          items: (ord.items || []).map(it => ({
+            id: it.productId || it.product?.id || it.id,
+            name: it.product?.name || it.productName || String(it.productId || ''),
+            qty: Number(it.qty || it.quantity || 0),
+            price: Number(it.price || 0),
+          })),
+          table: ord.table?.name || ord.tableName || undefined,
+          subtotal: Number(ord.subtotal || 0),
+          discount: Number(ord.discount || 0),
+          tax: Number(ord.tax || 0),
+          total: Number(ord.total || 0),
+          waiter: ord.waiter?.name || ord.waiterName || undefined,
+          cashier: user?.username || '',
+          branch: user?.branch || '',
+          section: ord.section?.name || undefined,
+          serviceType: ord.serviceType || undefined,
+          isReceipt: true,
+        };
+        setPrintData({ type: 'final-receipt', data: receiptData });
+        return;
+      }
+    } catch {}
+    // Fallback to provided sale payload
+    setPrintData({ type: 'final-receipt', data: sale });
   };
 
   const handleApplyDiscount = (newDiscount) => {
@@ -699,12 +1894,14 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
     setIsTaxModalOpen(false);
   };
 
+
   const currentSectionName = branchSections.find(s => s.id === currentSection)?.name || '';
+  const customerOptions = ['Walk-in', ...customers.map(c => c.name).filter(Boolean)];
   const subtotal = cart.reduce((sum, item) => sum + ((item.price || 0) * item.qty), 0);
-  const discountValue = discount.type === 'fixed' ? discount.value : subtotal * (discount.value / 100);
-  const taxableAmount = subtotal - discountValue;
-  const tax = taxableAmount * (taxRate / 100);
-  const total = taxableAmount + tax;
+  const discountValueRaw = discount.type === 'fixed' ? Number(discount.value || 0) : subtotal * (Number(discount.value || 0) / 100);
+  const discountValue = Math.max(0, Math.min(Number.isFinite(discountValueRaw) ? discountValueRaw : 0, subtotal));
+  const tax = subtotal * (Number(taxRate || 0) / 100);
+  const total = subtotal + tax - discountValue;
 
   const displayedProducts = products
     .filter(p => {
@@ -713,14 +1910,14 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
     })
     .filter(p => {
         if (activeCategory === 'All') return true;
-        if (activeCategory === 'Neutral') return p.station === 'neutral';
-        return p.station && p.station.toLowerCase() === activeCategory.toLowerCase();
+        const cat = getProductCategoryName(p).toLowerCase();
+        return cat === activeCategory.toLowerCase();
     })
     .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()));
   
   return (
     <>
-      <div className="flex flex-col h-screen font-sans print:hidden bg-pos-background">
+      <div className="flex flex-col h-screen font-sans print:hidden bg-white">
         <AppBar 
           time={time} 
           isOnline={isOnline} 
@@ -734,6 +1931,20 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
           recentSales={recentSales}
           products={products}
           handlePrint={handlePrint}
+          businessInfo={businessInfo}
+        />
+        <OverridePinModal
+          open={isOverrideOpen}
+          onClose={() => { setOverrideOpen(false); setPendingOverride(null); }}
+          onConfirm={handleOverrideConfirm}
+          title="Global Override Required"
+          description="Enter Global Override PIN to confirm this action."
+        />
+        <ServiceStaffPinModal
+          open={isServicePinModalOpen}
+          mode="verify"
+          onClose={() => { setServicePinModalOpen(false); setPendingStaffId(null); }}
+          onVerify={handleVerifyServicePin}
         />
         <div className="flex flex-1 overflow-hidden">
           <ProductSidebar 
@@ -741,16 +1952,13 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
             setSearchTerm={setSearchTerm}
             activeCategory={activeCategory}
             setActiveCategory={setActiveCategory}
+            categories={sidebarCategories}
           />
-          <main className="flex-1 p-4 grid grid-cols-4 gap-4 overflow-y-auto content-start">
-            {displayedProducts.map(p => (
-              <ProductCard key={p.id} product={p} sectionName={currentSectionName} stock={stockLevels[p.id]?.[currentSectionName]} price={sectionPrices[p.id]?.[currentSectionName]} onAdd={addToCart} allowOverselling={allowOverselling} />
-            ))}
-          </main>
           <CartPanel
             user={user}
             cart={cart}
             onUpdateQty={updateQty}
+            onSetQty={setQty}
             onVoid={handleVoid}
             onPrintItem={handlePrintItem}
             subtotal={subtotal}
@@ -764,27 +1972,74 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
             setCurrentService={setCurrentService}
             currentCustomer={currentCustomer}
             setCurrentCustomer={setCurrentCustomer}
+            customerOptions={customerOptions}
             selectedTable={selectedTable}
             setSelectedTable={setSelectedTable}
             onClearCart={() => handlePinRequest({ type: 'clear_cart' })}
             tables={tables}
+            updateTableStatus={updateTableStatus}
+            markTableStatus={markTableStatus}
             onSaveDraft={handleSaveDraft}
             onViewDrafts={() => setIsDraftsOpen(true)}
             onOpenCashDrawer={() => setCashDrawerModalOpen(true)}
             onTakePayment={handleTakePayment}
-            draftCount={drafts.length}
+            draftCount={drafts.filter(d => !(d.isSuspended || String(d.status || '').toUpperCase() === 'SUSPENDED')).length}
             editingDraft={editingDraft}
             onPrintBill={handlePrintBill}
-            canAcceptPayment={true}
+            canAcceptPayment={hasAny(userPermissions, ['add_pos_sell', 'add_payment'])}
             serviceStaffList={serviceStaffList}
             selectedStaff={selectedStaff}
-            setSelectedStaff={setSelectedStaff}
+            setSelectedStaff={requestSelectStaff}
             onPrintByCategory={handlePrintByCategory}
             onViewSalesHistory={() => setIsSalesHistoryOpen(true)}
             onEditDiscount={() => handlePinRequest({ type: 'edit_discount' })}
             onEditTax={() => setIsTaxModalOpen(true)}
             taxRate={taxRate}
+            serviceTypes={serviceTypes}
+            currencySymbol={(() => {
+              const raw = (businessInfo && (businessInfo.currencySymbol || businessInfo.currency)) || '₦';
+              const str = String(raw).trim();
+              const symbolMatch = str.match(/[$€£₦¥₹₽﷼₺₩₫]/);
+              if (symbolMatch) return symbolMatch[0];
+              const code = (str.split(/\s|-|\|/)[0] || '').toUpperCase().slice(0,3);
+              const map = { NGN: '₦', USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: '¥', INR: '₹' };
+              return map[code] || (code && code.length === 3 ? code : '₦');
+            })()}
           />
+          {(Array.isArray(branchSections) && branchSections.length === 0) && (
+            <div className="mx-4 mb-4 p-3 rounded-md bg-yellow-50 text-yellow-800 border border-yellow-200">
+              No sections found for this branch. Create at least one section in Settings → Sections to start selling.
+            </div>
+          )}
+          {(Array.isArray(serviceTypes) && serviceTypes.length === 0) && (
+            <div className="mx-4 mb-4 p-3 rounded-md bg-blue-50 text-blue-800 border border-blue-200">
+              No service types configured. Add service types (e.g., Dine-in, Takeaway) in Settings → Service Types.
+            </div>
+          )}
+          {(currentSection && Array.isArray(tables) && tables.filter(t => t.sectionId === currentSection).length === 0) && (
+            <div className="mx-4 mb-4 p-3 rounded-md bg-rose-50 text-rose-800 border border-rose-200">
+              No tables in the selected section. Add tables in Settings → Tables or switch to a section that has tables.
+            </div>
+          )}
+          <main className="flex-1 p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4 overflow-y-auto content-start">
+            {displayedProducts.map(p => {
+              const sectionPriceMap = sectionPrices[p.id] || {};
+              const preferred = sectionPriceMap[currentSectionName];
+              const anySectionPrice = preferred !== undefined ? preferred : Object.values(sectionPriceMap)[0];
+              const resolvedPrice = (anySectionPrice !== undefined && anySectionPrice !== null) ? anySectionPrice : p.price;
+              return (
+              <ProductCard
+                key={p.id}
+                product={p}
+                sectionName={currentSectionName}
+                stockReady={stockReady}
+                stock={(stockLevels[p.id]?.[currentSectionName] ?? stockLevels[p.id]?.['default'] ?? 0)}
+                price={resolvedPrice}
+                onAdd={addToCart}
+                allowOverselling={allowOverselling}
+              />
+            );})}
+          </main>
         </div>
         <PinModal
           isOpen={isPinModalOpen}
@@ -798,6 +2053,16 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
           drafts={drafts}
           onLoad={handleLoadDraft}
           onDelete={handleDeleteDraft}
+          onViewSuspended={handleViewSuspended}
+          onSettleSuspended={handleSettleSuspended}
+          onReturnSuspended={(draft) => setReturnOrder({ orderId: draft?.orderId, draft })}
+          isLoading={loadingDrafts}
+          page={draftsPage}
+          pageSize={draftsPageSize}
+          total={drafts.filter(d => !(d.isSuspended || String(d.status || '').toUpperCase() === 'SUSPENDED')).length}
+          onPageChange={(p) => fetchDrafts(p)}
+          onPageSizeChange={(sz) => { setDraftsPageSize(sz); fetchDrafts(1); }}
+          onRefresh={() => fetchDrafts(draftsPage)}
         />
         <PaymentModal
           isOpen={isPaymentModalOpen}
@@ -820,7 +2085,7 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
           isOpen={isSalesHistoryOpen}
           onClose={() => setIsSalesHistoryOpen(false)}
           sales={recentSales}
-          onReprint={(sale) => handlePrint('final-receipt', sale)}
+          onReprint={handleReprint}
         />
         <DiscountTaxModal
           isOpen={isDiscountModalOpen}
@@ -839,83 +2104,106 @@ const POSInterface = ({ user, toggleTheme, currentTheme, onBackToDashboard, onLo
           initialValue={taxRate}
         />
       </div>
+      {/* View Suspended Order Modal */}
+      {viewOrder && (
+        <Dialog open={true} onOpenChange={() => setViewOrder(null)}>
+          <DialogContent className="max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Suspended Order</DialogTitle>
+              <DialogDescription>Review items for {viewOrder?.draft?.name}</DialogDescription>
+            </DialogHeader>
+            <div className="max-h-[50vh] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr><th className="text-left p-2">Item</th><th className="text-right p-2">Qty</th><th className="text-right p-2">Price</th></tr>
+                </thead>
+                <tbody>
+                  {(viewOrder?.order?.items || []).map((it, idx) => (
+                    <tr key={idx} className="border-t">
+                      <td className="p-2">{it.product?.name || it.productName || it.productId}</td>
+                      <td className="p-2 text-right">{it.qty}</td>
+                      <td className="p-2 text-right">{fmt(it.price)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="mt-3 text-right font-semibold">Total: {fmt(viewOrder?.order?.total || viewOrder?.draft?.total)}</div>
+            </div>
+            <DialogFooter>
+              <Button onClick={() => setViewOrder(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      {/* Return Suspended Order Modal */}
+      {returnOrder && (
+        <Dialog open={true} onOpenChange={() => setReturnOrder(null)}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Return Sale</DialogTitle>
+              <DialogDescription>Select what to return. For now, you can return all.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <Button variant="destructive" onClick={handleReturnAll}>Return All</Button>
+            </div>
+            <DialogFooter>
+              <Button onClick={() => setReturnOrder(null)} variant="outline">Cancel</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
       {printData && <PrintView ref={printRef} type={printData.type} data={printData.data} />}
     </>
   );
 };
 
-const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashboard, onLogout, shiftRegister, onShiftClose, recentSales, products, handlePrint }) => {
+const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashboard, onLogout, shiftRegister, onShiftClose, recentSales, products, handlePrint, businessInfo }) => {
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [isCloseFormOpen, setIsCloseFormOpen] = useState(false);
   const [closingCash, setClosingCash] = useState('');
   const [isZReportOpen, setIsZReportOpen] = useState(false);
   const [reportData, setReportData] = useState(null);
 
-  const generateReportData = () => {
+  const generateReportData = async () => {
     if (!shiftRegister) return null;
-
-    const shiftSales = recentSales.filter(sale => new Date(sale.id) >= new Date(shiftRegister.openedAt));
-    
-    const totalSoldItems = shiftSales.reduce((acc, sale) => {
-        sale.items.forEach(item => {
-            acc[item.id] = (acc[item.id] || 0) + item.qty;
-        });
+    try {
+      const payload = { shiftId: shiftRegister.id, branchId: shiftRegister.branchId, sectionId: shiftRegister.sectionId };
+      const rep = await api.reports.shift(payload);
+      const itemsByCategory = (rep?.items?.byCategory || []).reduce((acc, it) => {
+        acc[it.name || 'Unknown'] = [...(acc[it.name || 'Unknown'] || []), { name: it.name || 'Unknown', qty: it.count }];
         return acc;
-    }, {});
-
-    const itemsWithDetails = Object.keys(totalSoldItems).map(id => {
-        const product = products.find(p => p.id.toString() === id.toString());
-        return {
-            id,
-            name: product?.name || 'Unknown Item',
-            qty: totalSoldItems[id],
-            brand: product?.brand || 'N/A',
-            category: product?.category || 'N/A',
-        };
-    });
-
-    const byBrand = itemsWithDetails.reduce((acc, item) => {
-        acc[item.brand] = [...(acc[item.brand] || []), item];
+      }, {});
+      const byBrand = (rep?.items?.byBrand || []).reduce((acc, it) => {
+        acc[it.name || 'N/A'] = [...(acc[it.name || 'N/A'] || []), { name: it.name || 'N/A', qty: it.count }];
         return acc;
-    }, {});
-
-    const byCategory = itemsWithDetails.reduce((acc, item) => {
-        acc[item.category] = [...(acc[item.category] || []), item];
-        return acc;
-    }, { 'Bar': [], 'Kitchen': [], 'Neutral': [] }); // Initialize with known categories
-
-    const paymentBreakdown = shiftSales.reduce((acc, sale) => {
-        const method = sale.paymentDetails.method;
-        if (method === 'cash') acc.cash += sale.total;
-        else if (method === 'card') acc.card += sale.total;
-        else if (method === 'transfer') acc.transfer += sale.total;
-        return acc;
-    }, { cash: 0, card: 0, transfer: 0 });
-
-    const totalCredit = (JSON.parse(localStorage.getItem('loungeDrafts') || '[]'))
-        .filter(d => d.isSuspended && new Date(d.updatedAt) >= new Date(shiftRegister.openedAt))
-        .reduce((sum, d) => sum + d.total, 0);
-
-    const serviceStaff = [...new Set(shiftSales.map(s => s.waiter).filter(Boolean))].join(', ');
-    const cashiers = [...new Set(shiftSales.map(s => s.cashier).filter(Boolean))].join(', ');
-
-    return {
-        items: itemsWithDetails,
+      }, {});
+      const paymentBreakdown = {
+        cash: rep?.summary?.byMethod?.cash || 0,
+        card: rep?.summary?.byMethod?.card || 0,
+        transfer: rep?.summary?.byMethod?.transfer || 0,
+      };
+      const serviceStaff = 'N/A';
+      const cashiers = (rep?.staff?.cashiers || []).map(c => c.name).filter(Boolean).join(', ') || 'N/A';
+      return {
+        items: (rep?.items?.byCategory || []).map(it => ({ id: it.name, name: it.name, qty: it.count, brand: 'N/A', category: it.name })),
         byBrand,
-        byCategory,
-        totalSales: shiftSales.reduce((sum, s) => sum + s.total, 0),
+        byCategory: itemsByCategory,
+        totalSales: rep?.summary?.totalSales || 0,
         ...paymentBreakdown,
-        totalCredit,
+        totalCredit: rep?.summary?.totalCreditSales || 0,
         serviceStaff,
         cashiers,
         shiftRegister,
         user,
         reportType: 'Shift Details'
-    };
+      };
+    } catch {
+      return null;
+    }
   };
 
-  const handleOpenReport = (type) => {
-    const data = generateReportData();
+  const handleOpenReport = async (type) => {
+    const data = await generateReportData();
     if (data) {
       const reportWithType = {...data, reportType: type};
       setReportData(reportWithType);
@@ -937,33 +2225,25 @@ const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashb
     toast({ title: "Feature coming soon!", description: "Export functionality is not yet implemented." });
   };
 
-  const handleCloseRegister = (e) => {
+  const handleCloseRegister = async (e) => {
     e.preventDefault();
     const cashAmount = parseFloat(closingCash);
-     if (isNaN(cashAmount) || cashAmount < 0) {
+    if (isNaN(cashAmount) || cashAmount < 0) {
       toast({ title: "Invalid Amount", description: "Please enter a valid closing cash amount.", variant: "destructive" });
       return;
     }
-    const updatedRegister = {
-      ...shiftRegister,
-      closedAt: new Date().toISOString(),
-      closingCash: cashAmount,
-      difference: cashAmount - (shiftRegister.expectedCash || shiftRegister.openingCash),
-    };
-    
-    const shiftHistory = JSON.parse(localStorage.getItem('loungeShiftHistory') || '[]');
-    shiftHistory.push(updatedRegister);
-    localStorage.setItem('loungeShiftHistory', JSON.stringify(shiftHistory));
-    
-    localStorage.removeItem('loungeShiftRegister');
-    toast({ title: "Register Closed!", description: `Shift ended.` });
-    setIsCloseFormOpen(false);
-    onShiftClose();
-    onBackToDashboard();
+    try {
+      await api.shifts.close(shiftRegister.id, { closingCash: cashAmount });
+      toast({ title: "Register Closed!", description: `Shift ended.` });
+      setIsCloseFormOpen(false);
+      onShiftClose();
+      onBackToDashboard();
+    } catch (err) {
+      toast({ title: 'Failed to close shift', description: String(err?.message || err), variant: 'destructive' });
+    }
   };
 
   const notifications = [
-    { id: 1, text: "Welcome to Stanforde Laze POS!", time: "9:00 AM" },
     { id: 2, text: "System updated to version 1.1.0.", time: "Yesterday" },
   ];
 
@@ -973,8 +2253,13 @@ const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashb
         <Button variant="ghost" size="icon" onClick={onBackToDashboard} aria-label="Back to Dashboard">
           <ArrowLeft className="w-6 h-6 text-primary" />
         </Button>
-        <Coffee className="w-6 h-6 text-primary" />
-        <span className="font-bold text-lg">{user.branch}</span>
+        {businessInfo?.logoUrl ? (
+          <img src={businessInfo.logoUrl} alt="logo" className="h-8 w-auto object-contain" />
+        ) : <Coffee className="w-6 h-6 text-primary" />}
+        <div className="flex flex-col leading-tight">
+          <span className="font-bold text-lg">{businessInfo?.name || 'POS'}</span>
+          <span className="text-xs text-muted-foreground">{(user?.branch && (user.branch.name || user.branch)) || ''}</span>
+        </div>
       </div>
       <div className="flex items-center gap-3 text-sm font-medium text-muted-foreground">
         <span>{time.toLocaleTimeString()}</span>
@@ -1002,7 +2287,7 @@ const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashb
                   <DialogDescription>Count the cash in the drawer and enter the final amount.</DialogDescription>
               </DialogHeader>
               <form onSubmit={handleCloseRegister} className="space-y-4 pt-4">
-                  <p className="text-sm text-muted-foreground">Expected amount: <span className="font-bold text-foreground">${(shiftRegister?.expectedCash || shiftRegister?.openingCash || 0).toFixed(2)}</span></p>
+                  <p className="text-sm text-muted-foreground">Expected amount: <span className="font-bold text-foreground">{fmt(shiftRegister?.expectedCash ?? shiftRegister?.openingCash ?? 0)}</span></p>
                   <div className="space-y-2">
                       <Label htmlFor="closing-cash">Counted Cash Amount</Label>
                       <div className="relative">
@@ -1057,7 +2342,7 @@ const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashb
             <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="rounded-full">
                     <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center font-semibold text-primary">
-                      {user.username.charAt(0).toUpperCase()}
+                      {(user?.username?.charAt(0)?.toUpperCase()) || '?'}
                     </div>
                 </Button>
             </DropdownMenuTrigger>
@@ -1067,7 +2352,10 @@ const AppBar = ({ time, isOnline, user, toggleTheme, currentTheme, onBackToDashb
                 <DropdownMenuGroup>
                     <DropdownMenuItem>
                         <UserIcon className="mr-2 h-4 w-4" />
-                        <span>{user.username} ({user.role})</span>
+                        {(() => {
+                          const humanRole = user?.appRole?.name || user?.role || '';
+                          return <span>{`${user?.username || 'User'}${humanRole ? ` (${humanRole})` : ''}`}</span>;
+                        })()}
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => toast({ title: "🚧 This feature isn't implemented yet—but don't worry! You can request it in your next prompt! 🚀" })}>
                         <Info className="mr-2 h-4 w-4" />
@@ -1097,18 +2385,18 @@ const ReportDialogContent = ({ reportData, onClose, onPrint, onExport }) => (
         <div className="max-h-[70vh] overflow-y-auto p-1 text-sm">
             <div className="grid grid-cols-2 gap-x-8 gap-y-2 mb-4">
                 <InfoItem label="Section" value={reportData.shiftRegister.sectionName} />
-                <InfoItem label="Report Generated By" value={reportData.user.username} />
+                <InfoItem label="Report Generated By" value={reportData.user?.username || ''} />
                 <InfoItem label="Shift Started" value={new Date(reportData.shiftRegister.openedAt).toLocaleString()} />
                 <InfoItem label="Report Time" value={new Date().toLocaleString()} />
             </div>
 
             <h3 className="font-bold text-lg my-4 border-b pb-2">Sales Summary</h3>
             <div className="grid grid-cols-2 gap-x-8 gap-y-2">
-                <InfoItem label="Total Sales" value={`${reportData.totalSales.toFixed(2)}`} className="font-bold text-primary" />
-                <InfoItem label="Total Credit Sales" value={`${reportData.totalCredit.toFixed(2)}`} />
-                <InfoItem label="Paid by Cash" value={`${reportData.cash.toFixed(2)}`} />
-                <InfoItem label="Paid by Card" value={`${reportData.card.toFixed(2)}`} />
-                <InfoItem label="Paid by Transfer" value={`${reportData.transfer.toFixed(2)}`} />
+                <InfoItem label="Total Sales" value={`${fmt(reportData.totalSales)}`} className="font-bold text-primary" />
+                <InfoItem label="Total Credit Sales" value={`${fmt(reportData.totalCredit)}`} />
+                <InfoItem label="Paid by Cash" value={`${fmt(reportData.cash)}`} />
+                <InfoItem label="Paid by Card" value={`${fmt(reportData.card)}`} />
+                <InfoItem label="Paid by Transfer" value={`${fmt(reportData.transfer)}`} />
             </div>
             
             <h3 className="font-bold text-lg my-4 border-b pb-2">Items Sold ({reportData.items.reduce((sum, i) => sum + i.qty, 0)} total)</h3>
@@ -1151,7 +2439,7 @@ const ReportDialogContent = ({ reportData, onClose, onPrint, onExport }) => (
     </DialogContent>
 );
 
-const ProductSidebar = ({ searchTerm, setSearchTerm, activeCategory, setActiveCategory }) => (
+const ProductSidebar = ({ searchTerm, setSearchTerm, activeCategory, setActiveCategory, categories: sidebarCats = categories }) => (
   <aside className="w-[320px] bg-card border-r p-4 flex flex-col gap-4">
     <div className="relative">
       <Input 
@@ -1163,23 +2451,24 @@ const ProductSidebar = ({ searchTerm, setSearchTerm, activeCategory, setActiveCa
       <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
     </div>
     <div className="flex gap-2 flex-wrap">
-      {categories.map(c => (
-        <Button 
-          key={c} 
-          variant={activeCategory === c ? 'default' : 'secondary'} 
-          size="sm" 
-          className="text-xs"
+      {sidebarCats.map(c => (
+        <button
+          key={c}
           onClick={() => setActiveCategory(c)}
+          className={`px-3 py-1.5 text-xs rounded-full border transition-colors
+            ${activeCategory === c
+              ? 'bg-blue-600 text-white border-blue-600'
+              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
         >
           {c}
-        </Button>
+        </button>
       ))}
     </div>
   </aside>
 );
 
-const ProductCard = ({ product, stock, price, onAdd, allowOverselling }) => {
-  const isOutOfStock = stock <= 0 && !allowOverselling;
+const ProductCard = ({ product, stock, stockReady, price, onAdd, allowOverselling }) => {
+  const isOutOfStock = !!stockReady && (stock <= 0) && !allowOverselling;
 
   const handleClick = () => {
     if (!isOutOfStock) {
@@ -1188,37 +2477,54 @@ const ProductCard = ({ product, stock, price, onAdd, allowOverselling }) => {
   };
 
   return (
-    <motion.div whileHover={!isOutOfStock ? { scale: 1.05 } : {}}>
+    <motion.div whileHover={!isOutOfStock ? { scale: 1.02 } : {}}>
       <Card 
-        className={`rounded-xl shadow-md overflow-hidden flex flex-col justify-between relative aspect-square ${isOutOfStock ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+        className={`rounded-xl shadow-sm hover:shadow overflow-hidden relative aspect-square border border-slate-200 ${isOutOfStock ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
         onClick={handleClick}
       >
-        {isOutOfStock && (
-          <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-10">
-            <span className="text-white font-bold text-xs bg-destructive px-2 py-0.5 rounded">OUT OF STOCK</span>
+        {/* Background image or placeholder covering full card */}
+        {product.imageUrl ? (
+          <img src={product.imageUrl} alt={product.name} className="absolute inset-0 w-full h-full object-cover" />
+        ) : (
+          <div className="absolute inset-0 w-full h-full bg-muted flex items-center justify-center">
+            <Image className="w-10 h-10 text-muted-foreground" />
           </div>
         )}
-        <div className="p-2 flex flex-col flex-grow">
-          <div className="flex justify-between items-start">
-            <h3 className="font-semibold text-xs leading-tight">{product.name}</h3>
-            <span className="text-[0.6rem] font-bold px-1 py-0.5 rounded-full bg-secondary text-secondary-foreground shrink-0 ml-1">{product.station?.toUpperCase()}</span>
-          </div>
-          <div className="flex-grow"></div>
-          <div className="flex justify-between items-end mt-1">
-            <span className="text-sm font-bold text-primary">${(price || 0).toFixed(2)}</span>
-            <span className={`text-xs ${stock <= 0 ? 'text-destructive font-semibold' : 'text-muted-foreground'}`}>Stock: {stock === undefined ? 'N/A' : stock}</span>
+        {/* Subtle gradient for readability */}
+        <div className="absolute inset-0 bg-gradient-to-b from-black/0 via-black/10 to-black/40" />
+
+        {/* Overlay content */}
+        <div className="absolute inset-0 p-2 flex flex-col">
+          <div className="flex-1" />
+          <div className="space-y-1">
+            <h3 className="font-extrabold text-sm leading-tight line-clamp-2 text-white drop-shadow">{product.name}</h3>
+            <div className="flex justify-between items-center">
+              <span className="text-sm font-extrabold text-white drop-shadow">{fmt(price || 0)}</span>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-600/80 text-white`}>
+                { !stockReady ? '...' : (stock === undefined ? 'N/A' : `Stock: ${stock}`) }
+              </span>
+            </div>
           </div>
         </div>
-        <div className={`text-center p-1 font-semibold text-xs ${isOutOfStock ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'}`}>
-          {isOutOfStock ? 'Unavailable' : 'Add to Cart'}
-        </div>
+
+        {isOutOfStock && (
+          <div className="absolute top-1.5 right-1.5 z-10">
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold bg-amber-500 text-white px-1.5 py-0.5 rounded">
+              <AlertTriangle className="w-3 h-3" />
+              Out of stock
+            </span>
+          </div>
+        )}
       </Card>
     </motion.div>
   );
 };
 
-const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, discountValue, tax, total, currentSection, setCurrentSection, branchSections, currentService, setCurrentService, currentCustomer, setCurrentCustomer, selectedTable, setSelectedTable, onClearCart, tables, onSaveDraft, onViewDrafts, onOpenCashDrawer, onTakePayment, draftCount, editingDraft, onPrintBill, canAcceptPayment, serviceStaffList, selectedStaff, setSelectedStaff, onPrintByCategory, onViewSalesHistory, onEditDiscount, onEditTax, taxRate }) => (
-  <aside className="w-[400px] bg-card border-l flex flex-col">
+const CartPanel = ({ user = {}, cart = [], onUpdateQty, onSetQty, onVoid, onPrintItem, subtotal = 0, discountValue = 0, tax = 0, total = 0, currentSection, setCurrentSection, branchSections = [], currentService = '', setCurrentService, currentCustomer = '', setCurrentCustomer, customerOptions = [], selectedTable = null, setSelectedTable, onClearCart, tables = [], updateTableStatus, onSaveDraft, onViewDrafts, onOpenCashDrawer, onTakePayment, draftCount = 0, editingDraft = null, onPrintBill, canAcceptPayment = true, serviceStaffList = [], selectedStaff = null, setSelectedStaff, onPrintByCategory, onViewSalesHistory, onEditDiscount, onEditTax, taxRate = 0, serviceTypes = [], currencySymbol = '₦' }) => {
+  const isDineIn = /dine/i.test(String(currentService || '').trim());
+  const [editQty, setEditQty] = useState({});
+  return (
+  <aside className="w-[460px] bg-card border-l flex flex-col">
     <div className="p-4 border-b space-y-3">
        {editingDraft && (
         <div className="p-2 bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 rounded-md text-sm text-center">
@@ -1228,14 +2534,14 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
       <div className="grid grid-cols-2 gap-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="w-full flex justify-between" disabled={true}>
+            <Button variant="outline" size="sm" className="w-full flex justify-between">
               {branchSections.find(s => s.id === currentSection)?.name || 'Select Section'}
               <ChevronDown className="w-4 h-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-56">
             {branchSections.length > 0 ? branchSections.map(section => (
-              <DropdownMenuItem key={section.id} onSelect={() => setCurrentSection(section.id)} disabled={true}>
+              <DropdownMenuItem key={section.id} onSelect={() => setCurrentSection(section.id)}>
                 {section.name}
               </DropdownMenuItem>
             )) : <DropdownMenuItem disabled>No sections in this branch</DropdownMenuItem>}
@@ -1266,9 +2572,9 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-56">
-            {customerTypes.map(type => (
-              <DropdownMenuItem key={type} onSelect={() => setCurrentCustomer(type)}>
-                {type}
+            {(customerOptions || ['Walk-in']).map(name => (
+              <DropdownMenuItem key={name} onSelect={() => setCurrentCustomer(name)}>
+                {name}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -1277,7 +2583,7 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" className="w-full flex justify-between items-center" disabled={!!editingDraft}>
-              <span className="truncate">{serviceStaffList.find(s => s.id === selectedStaff)?.username || 'Select Staff'}</span>
+              <span className="truncate">{serviceStaffList.find(s => s.id === selectedStaff)?.username || 'service staff'}</span>
               <ChevronDown className="w-4 h-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -1291,21 +2597,39 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
         </DropdownMenu>
 
         <DropdownMenu>
-          <DropdownMenuTrigger asChild disabled={currentService !== 'Dine-in' || !!editingDraft}>
+          <DropdownMenuTrigger asChild disabled={!isDineIn || !!editingDraft}>
             <Button variant="outline" size="sm" className={`w-full flex justify-between ${selectedTable ? 'border-accent text-accent' : ''}`}>
               {selectedTable ? `Table: ${selectedTable.name}` : 'Select Table'}
               <ChevronDown className="w-4 h-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-56">
-            {tables.filter(t => t.section === branchSections.find(s => s.id === currentSection)?.name && t.status === 'available').map(table => (
+            {tables
+              .filter(t => t.sectionId === currentSection)
+              .map(table => (
               <DropdownMenuItem 
                 key={table.id} 
-                onSelect={() => {
-                  setSelectedTable(table);
-                  toast({ title: `Table ${table.name} selected.` });
+                onSelect={async () => {
+                  if (!isDineIn) return;
+                  try {
+                    // Optimistically set selection to avoid add-to-cart race
+                    setSelectedTable({ ...table, status: 'occupied' });
+                    const ok = await updateTableStatus(table.id, 'occupied');
+                    if (ok) {
+                      if (typeof markTableStatus === 'function') {
+                        try { markTableStatus(table.id, 'occupied'); } catch {}
+                      }
+                      toast({ title: `Table ${table.name} locked.` });
+                    } else {
+                      setSelectedTable(null);
+                      toast({ title: `Could not lock ${table.name}`, description: 'Please choose another table.', variant: 'destructive' });
+                    }
+                  } catch (e) {
+                    setSelectedTable(null);
+                    toast({ title: `Could not lock ${table.name}`, description: String(e?.message || e), variant: 'destructive' });
+                  }
                 }}
-                disabled={table.status === 'occupied' && (!editingDraft || editingDraft.table?.id !== table.id)}
+                disabled={!isDineIn || (table.status === 'occupied' && (!editingDraft || editingDraft.table?.id !== table.id))}
               >
                 <span className="flex items-center justify-between w-full">
                   {table.name} 
@@ -1324,14 +2648,23 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
         <div key={item.id} className="flex items-center bg-background p-2 rounded-lg">
           <div className="flex-1">
             <p className="font-medium">{item.name}</p>
-            <p className="text-sm text-muted-foreground">${(item.price || 0).toFixed(2)}</p>
+            <p className="text-sm text-muted-foreground">{currencySymbol}{(item.price || 0).toFixed(2)}</p>
           </div>
           <div className="flex items-center gap-2">
             <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => onUpdateQty(item.id, -1)}><Minus className="w-4 h-4" /></Button>
-            <span className="w-6 text-center font-semibold">{item.qty}</span>
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              className="w-14 h-8 text-center"
+              value={editQty[item.id] ?? item.qty}
+              onChange={(e) => setEditQty(prev => ({ ...prev, [item.id]: e.target.value }))}
+              onBlur={() => { const v = editQty[item.id]; if (v !== undefined) { onSetQty?.(item.id, v); setEditQty(prev => { const n = { ...prev }; delete n[item.id]; return n; }); } }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur(); } }}
+            />
             <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => onUpdateQty(item.id, 1)}><Plus className="w-4 h-4" /></Button>
           </div>
-          <p className="w-20 text-right font-semibold">${((item.price || 0) * item.qty).toFixed(2)}</p>
+          <p className="w-20 text-right font-semibold">{currencySymbol}{((item.price || 0) * item.qty).toFixed(2)}</p>
           <div className="flex items-center ml-1">
             <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground" onClick={() => onPrintItem(item)}><Printer className="w-4 h-4" /></Button>
             <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" onClick={() => onVoid(item.id)}><X className="w-4 h-4" /></Button>
@@ -1341,7 +2674,7 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
     </div>
     <div className="p-2 border-t space-y-2 bg-background/50">
       <div className="space-y-0.5 text-xs">
-        <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span>${subtotal.toFixed(2)}</span></div>
+        <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span>{currencySymbol}{subtotal.toFixed(2)}</span></div>
         <div className="flex justify-between items-center">
           <div className="flex items-center">
             <span className="text-muted-foreground">Discount</span>
@@ -1349,7 +2682,7 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
               <Pencil className="h-3 w-3" />
             </Button>
           </div>
-          <span className="text-destructive">-${discountValue.toFixed(2)}</span>
+          <span className="text-destructive">-{currencySymbol}{discountValue.toFixed(2)}</span>
         </div>
         <div className="flex justify-between items-center">
           <div className="flex items-center">
@@ -1358,9 +2691,9 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
               <Pencil className="h-3 w-3" />
             </Button>
           </div>
-          <span>${tax.toFixed(2)}</span>
+          <span>{currencySymbol}{tax.toFixed(2)}</span>
         </div>
-        <div className="flex justify-between font-bold text-base"><span className="text-foreground">Total</span><span>${total.toFixed(2)}</span></div>
+        <div className="flex justify-between font-bold text-base"><span className="text-foreground">Total</span><span>{currencySymbol}{total.toFixed(2)}</span></div>
       </div>
       <div className="flex gap-1">
         <Button size="sm" variant="destructive" className="flex-1 h-8 text-xs" onClick={onClearCart}><Trash2 className="w-3 h-3 mr-1"/> Clear</Button>
@@ -1387,26 +2720,29 @@ const CartPanel = ({ user, cart, onUpdateQty, onVoid, onPrintItem, subtotal, dis
         <Button size="icon" variant="secondary" className="h-8 w-full" onClick={() => onPrintByCategory('bar')} title="Print Bar Items"><Beer className="w-4 h-4" /></Button>
         <Button size="icon" variant="secondary" className="h-8 w-full" onClick={() => onPrintByCategory('kitchen')} title="Print Kitchen Items"><ChefHat className="w-4 h-4" /></Button>
         <Button size="icon" variant="secondary" className="h-8 w-full" onClick={onViewSalesHistory} title="View Sales History"><Wallet className="w-4 h-4" /></Button>
-        <Button size="icon" variant="secondary" className="h-8 w-full" onClick={() => onTakePayment('multiple')} disabled={!canAcceptPayment} title="Multiple Payment Methods"><Layers className="w-4 h-4" /></Button>
+        <Button size="icon" variant="secondary" className="h-8 w-full" onClick={() => onPrintByCategory('grill')} title="Print Grill Items"><Layers className="w-4 h-4" /></Button>
       </div>
     </div>
   </aside>
-);
+  );
+};
 
-const DraftsDialog = ({ isOpen, onClose, drafts, onLoad, onDelete }) => (
+const DraftsDialog = ({ isOpen, onClose, drafts, onLoad, onDelete, onViewSuspended, onSettleSuspended, onReturnSuspended, isLoading, page, pageSize, total, onPageChange, onPageSizeChange, onRefresh }) => (
   <Dialog open={isOpen} onOpenChange={onClose}>
     <DialogContent className="max-w-2xl">
       <DialogHeader>
-        <DialogTitle>Saved Drafts & Suspended Bills</DialogTitle>
+        <DialogTitle>Saved Drafts</DialogTitle>
         <DialogDescription>Select an item to load, edit, or delete.</DialogDescription>
       </DialogHeader>
       <div className="max-h-[60vh] overflow-y-auto p-1">
-        {drafts.length > 0 ? (
+        {isLoading ? (
+          <p className="text-center text-muted-foreground py-10">Loading drafts...</p>
+        ) : drafts.length > 0 ? (
           <div className="space-y-3">
             {drafts.sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt)).map(draft => (
               <div key={draft.id} className={`border rounded-lg p-3 flex justify-between items-center ${draft.isSuspended ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800' : ''}`}>
                 <div>
-                  <p className="font-semibold">{draft.name}</p>
+                  <p className="font-semibold">{draft.isSuspended ? (draft.invoice ? `#${draft.invoice}` : draft.name) : draft.name}</p>
                   <p className="text-sm text-muted-foreground">
                     {draft.cart.length} items - {draft.service}
                     {draft.table && ` - Table: ${draft.table.name}`}
@@ -1418,16 +2754,52 @@ const DraftsDialog = ({ isOpen, onClose, drafts, onLoad, onDelete }) => (
                     {draft.customerDetails?.phone && ` | Phone: ${draft.customerDetails.phone}`}
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => onLoad(draft)}>Load</Button>
-                  <Button size="sm" variant="destructive" onClick={() => onDelete(draft.id)}>Delete</Button>
-                </div>
+                {draft.isSuspended ? (
+                  <div className="flex gap-2 items-center">
+                    <Button size="sm" variant="secondary" onClick={() => onViewSuspended?.(draft)}>View</Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm" variant="default">Paid ▾</Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {['cash','card','transfer','mobile'].map(m => (
+                          <DropdownMenuItem key={m} onClick={() => onSettleSuspended?.(draft, m)}>{m}</DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <Button size="sm" variant="outline" onClick={() => onReturnSuspended?.(draft)}>Return Sale</Button>
+                    <Button size="sm" variant="destructive" onClick={() => onDelete(draft.id)}>Delete</Button>
+                  </div>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => onLoad(draft)}>Load</Button>
+                    <Button size="sm" variant="destructive" onClick={() => onDelete(draft.id)}>Delete</Button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
         ) : (
           <p className="text-center text-muted-foreground py-10">No saved drafts or suspended bills.</p>
         )}
+      </div>
+      <div className="flex items-center justify-between px-1 py-2">
+        <div className="flex items-center gap-2 text-sm">
+          <span>Rows per page</span>
+          <select
+            className="border rounded px-2 py-1 bg-background"
+            value={pageSize}
+            onChange={(e) => onPageSizeChange?.(parseInt(e.target.value, 10))}
+          >
+            {[10,20,50,100].map(sz => <option key={sz} value={sz}>{sz}</option>)}
+          </select>
+          <span className="ml-3">{Math.min((page-1)*pageSize+1, total)}-{Math.min(page*pageSize, total)} of {total}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={() => onRefresh?.()} title="Refresh">Refresh</Button>
+          <Button variant="outline" size="sm" onClick={() => onPageChange?.(Math.max(1, page-1))} disabled={page <= 1}>Prev</Button>
+          <Button variant="outline" size="sm" onClick={() => onPageChange?.(page+1)} disabled={(page*pageSize) >= total}>Next</Button>
+        </div>
       </div>
       <DialogFooter>
         <Button onClick={onClose}>Close</Button>

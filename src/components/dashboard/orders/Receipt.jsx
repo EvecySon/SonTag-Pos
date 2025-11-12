@@ -4,6 +4,7 @@ import React from 'react';
 const Receipt = ({ order }) => {
   if (!order) return null;
   const businessInfo = JSON.parse(localStorage.getItem('businessInfo') || '{}');
+  const currency = businessInfo.currencySymbol || businessInfo.currency || '';
 
   return (
     <div className="w-[300px] p-4 bg-white text-black font-mono text-xs">
@@ -30,7 +31,7 @@ const Receipt = ({ order }) => {
             <tr key={index}>
               <td className="text-left">{item.name}</td>
               <td className="text-center">{item.quantity}</td>
-              <td className="text-right">${(item.quantity * item.price).toFixed(2)}</td>
+              <td className="text-right">{currency}{(item.quantity * item.price).toFixed(2)}</td>
             </tr>
           ))}
         </tbody>
@@ -38,15 +39,15 @@ const Receipt = ({ order }) => {
       <div className="border-t border-dashed border-black mt-2 pt-2">
         <div className="flex justify-between">
           <span>Subtotal</span>
-          <span>${order.total.toFixed(2)}</span>
+          <span>{currency}{order.total.toFixed(2)}</span>
         </div>
         <div className="flex justify-between">
           <span>Tax (0%)</span>
-          <span>$0.00</span>
+          <span>{currency}0.00</span>
         </div>
         <div className="flex justify-between font-bold text-sm mt-1">
           <span>TOTAL</span>
-          <span>${order.total.toFixed(2)}</span>
+          <span>{currency}{order.total.toFixed(2)}</span>
         </div>
       </div>
       <div className="border-t border-dashed border-black mt-2 pt-2">
@@ -56,8 +57,7 @@ const Receipt = ({ order }) => {
         </div>
       </div>
       <div className="text-center mt-4">
-        <p>Thank you for your visit!</p>
-        <p>Please come again.</p>
+        {businessInfo.receiptFooterNote && <p>{businessInfo.receiptFooterNote}</p>}
         <div className="mt-2 text-gray-500 text-[10px]">
           <p>SonTag POS/ERP software | Developed by SonTag Technologies</p>
           <p>Phone: +234-901-904-2426</p>

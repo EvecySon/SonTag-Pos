@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/use-toast';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { api } from '@/lib/api';
 
 const Contacts = ({ user }) => {
   const [activeTab, setActiveTab] = useState('suppliers');
@@ -21,11 +22,21 @@ const Contacts = ({ user }) => {
   const [formData, setFormData] = useState({});
 
   useEffect(() => {
-    const savedSuppliers = JSON.parse(localStorage.getItem('loungeSuppliers') || '[]');
-    const savedCustomers = JSON.parse(localStorage.getItem('loungeCustomers') || '[]');
-    setSuppliers(savedSuppliers);
-    setCustomers(savedCustomers);
-  }, []);
+    (async () => {
+      try {
+        const branchId = user?.branchId;
+        if (!branchId) { setSuppliers([]); setCustomers([]); return; }
+        const [s, c] = await Promise.all([
+          api.suppliers.list({ branchId }),
+          api.customers.list({ branchId }),
+        ]);
+        setSuppliers(Array.isArray(s?.items) ? s.items : (Array.isArray(s) ? s : []));
+        setCustomers(Array.isArray(c?.items) ? c.items : (Array.isArray(c) ? c : []));
+      } catch {
+        setSuppliers([]); setCustomers([]);
+      }
+    })();
+  }, [user?.branchId]);
 
   const resetFormData = (type) => ({
     id: Date.now(),
@@ -60,43 +71,46 @@ const Contacts = ({ user }) => {
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (contactType === 'supplier') {
-      let updatedSuppliers;
-      if (editingContact) {
-        updatedSuppliers = suppliers.map(s => s.id === editingContact.id ? formData : s);
+    try {
+      const branchId = user?.branchId;
+      if (!branchId) return;
+      if (contactType === 'supplier') {
+        if (editingContact) await api.suppliers.update(editingContact.id, { ...formData, branchId });
+        else await api.suppliers.create({ ...formData, branchId });
+        toast({ title: `✅ Supplier ${editingContact ? 'updated' : 'added'}!` });
+        const s = await api.suppliers.list({ branchId });
+        setSuppliers(Array.isArray(s?.items) ? s.items : (Array.isArray(s) ? s : []));
       } else {
-        updatedSuppliers = [...suppliers, formData];
+        if (editingContact) await api.customers.update(editingContact.id, { ...formData, branchId });
+        else await api.customers.create({ ...formData, branchId });
+        toast({ title: `✅ Customer ${editingContact ? 'updated' : 'added'}!` });
+        const c = await api.customers.list({ branchId });
+        setCustomers(Array.isArray(c?.items) ? c.items : (Array.isArray(c) ? c : []));
       }
-      setSuppliers(updatedSuppliers);
-      localStorage.setItem('loungeSuppliers', JSON.stringify(updatedSuppliers));
-      toast({ title: `✅ Supplier ${editingContact ? 'updated' : 'added'}!` });
-    } else {
-      let updatedCustomers;
-      if (editingContact) {
-        updatedCustomers = customers.map(c => c.id === editingContact.id ? formData : c);
-      } else {
-        updatedCustomers = [...customers, formData];
-      }
-      setCustomers(updatedCustomers);
-      localStorage.setItem('loungeCustomers', JSON.stringify(updatedCustomers));
-      toast({ title: `✅ Customer ${editingContact ? 'updated' : 'added'}!` });
+      handleCloseModal();
+    } catch (err) {
+      toast({ title: 'Save failed', description: String(err?.message || err), variant: 'destructive' });
     }
-    handleCloseModal();
   };
   
-  const handleDelete = (type, id) => {
-    if (type === 'supplier') {
-      const updatedSuppliers = suppliers.filter(s => s.id !== id);
-      setSuppliers(updatedSuppliers);
-      localStorage.setItem('loungeSuppliers', JSON.stringify(updatedSuppliers));
-      toast({ title: '🗑️ Supplier deleted' });
-    } else {
-      const updatedCustomers = customers.filter(c => c.id !== id);
-      setCustomers(updatedCustomers);
-      localStorage.setItem('loungeCustomers', JSON.stringify(updatedCustomers));
-      toast({ title: '🗑️ Customer deleted' });
+  const handleDelete = async (type, id) => {
+    try {
+      const branchId = user?.branchId;
+      if (type === 'supplier') {
+        await api.suppliers.remove(String(id));
+        const s = await api.suppliers.list({ branchId });
+        setSuppliers(Array.isArray(s?.items) ? s.items : (Array.isArray(s) ? s : []));
+        toast({ title: '🗑️ Supplier deleted' });
+      } else {
+        await api.customers.remove(String(id));
+        const c = await api.customers.list({ branchId });
+        setCustomers(Array.isArray(c?.items) ? c.items : (Array.isArray(c) ? c : []));
+        toast({ title: '🗑️ Customer deleted' });
+      }
+    } catch (err) {
+      toast({ title: 'Delete failed', description: String(err?.message || err), variant: 'destructive' });
     }
   };
 

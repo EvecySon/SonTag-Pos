@@ -11,12 +11,49 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.HealthController = void 0;
 const common_1 = require("@nestjs/common");
+const prisma_service_1 = require("./prisma/prisma.service");
 let HealthController = class HealthController {
+    prisma;
+    constructor(prisma) {
+        this.prisma = prisma;
+    }
     getHealth() {
         return {
             status: 'ok',
             service: 'backend-api',
             time: new Date().toISOString(),
+            version: process.env.APP_VERSION || undefined,
+            env: process.env.NODE_ENV || 'development',
+        };
+    }
+    getLiveness() {
+        return {
+            status: 'ok',
+            time: new Date().toISOString(),
+        };
+    }
+    async getReadiness() {
+        let dbOk = false;
+        let dbLatencyMs = undefined;
+        const started = Date.now();
+        try {
+            await this.prisma.$queryRaw `SELECT 1`;
+            dbOk = true;
+        }
+        catch {
+            dbOk = false;
+        }
+        finally {
+            dbLatencyMs = Date.now() - started;
+        }
+        const ok = dbOk;
+        return {
+            status: ok ? 'ok' : 'degraded',
+            db: dbOk ? 'ok' : 'down',
+            dbLatencyMs,
+            time: new Date().toISOString(),
+            version: process.env.APP_VERSION || undefined,
+            env: process.env.NODE_ENV || 'development',
         };
     }
 };
@@ -27,7 +64,20 @@ __decorate([
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)
 ], HealthController.prototype, "getHealth", null);
+__decorate([
+    (0, common_1.Get)('live'),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", void 0)
+], HealthController.prototype, "getLiveness", null);
+__decorate([
+    (0, common_1.Get)('ready'),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], HealthController.prototype, "getReadiness", null);
 exports.HealthController = HealthController = __decorate([
-    (0, common_1.Controller)('health')
+    (0, common_1.Controller)('health'),
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService])
 ], HealthController);
 //# sourceMappingURL=health.controller.js.map

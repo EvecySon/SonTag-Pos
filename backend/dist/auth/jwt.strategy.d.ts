@@ -1,16 +1,18 @@
-import { ConfigService } from '@nestjs/config';
-export interface JwtPayload {
-    sub: string;
-    role: string;
-    branchId?: string | null;
-}
+import { PrismaService } from '../prisma/prisma.service';
 declare const JwtStrategy_base: new (...args: any) => any;
 export declare class JwtStrategy extends JwtStrategy_base {
-    constructor(config: ConfigService);
-    validate(payload: JwtPayload): Promise<{
-        userId: string;
-        role: string;
+    private prisma;
+    constructor(prisma: PrismaService);
+    validate(payload: any): Promise<{
+        userId: any;
+        username: any;
+        role: any;
         branchId: string | null;
+    } | {
+        userId: any;
+        username: any;
+        role: any;
+        branchId?: undefined;
     }>;
 }
 export {};

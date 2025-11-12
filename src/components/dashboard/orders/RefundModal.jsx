@@ -14,13 +14,23 @@ const RefundModal = ({ order, isOpen, onClose, onConfirm }) => {
     onConfirm(order.id, reason);
   };
 
+  const invoiceLabel = (() => {
+    const raw = order.displayInvoice || order.invoice_no || order.invoiceNo || order.receiptNo || (order.orderNumber != null ? String(order.orderNumber) : null) || (order.id && order.id.slice ? order.id.slice(0,8) : String(order.id));
+    if (order.orderNumber != null) return `INV${String(order.orderNumber).padStart(3,'0')}`;
+    const s = String(raw || '');
+    if (/^inv/i.test(s)) return s;
+    if (/^\d+$/.test(s)) return `INV${String(Number(s)).padStart(3,'0')}`;
+    return s;
+  })();
+  const total = Number(order.total ?? order.totalAmount ?? 0);
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-md glass-effect">
         <DialogHeader>
           <DialogTitle className="text-amber-600 text-2xl">Process Refund</DialogTitle>
           <DialogDescription>
-            Confirm refund for order {order.id} totaling ${(order.total || 0).toFixed(2)}. This action cannot be undone.
+            Confirm refund for order #{invoiceLabel} totaling ${total.toFixed(2)}. This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <div className="my-4 space-y-4">

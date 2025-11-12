@@ -11,92 +11,213 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from '@/components/ui/switch';
+import { api, getApiBaseUrl } from '@/lib/api';
+import { RequirePermission } from '@/lib/permissions';
+import ProductOverview from '@/components/dashboard/ProductOverview';
 
 
-const initialProducts = [
-  { id: 1, name: 'Espresso', category: 'Hot Drinks', brand: 'Lavazza', station: 'bar', is_kitchen_item: false, is_bar_item: true },
-  { id: 2, name: 'Club Sandwich', category: 'Sandwiches', brand: 'Generic', station: 'kitchen', is_kitchen_item: true, is_bar_item: false },
-  { id: 3, name: 'Mojito', category: 'Cold Drinks', brand: 'Generic', station: 'bar', is_kitchen_item: false, is_bar_item: true },
-  { id: 4, name: 'French Fries', category: 'Snacks', brand: 'Generic', station: 'kitchen', is_kitchen_item: true, is_bar_item: false },
-];
-
-const initialStockLevels = {
-  1: { 'Main Store': 100, 'Bar Store': 20 },
-  2: { 'Main Kitchen': 50 },
-  3: { 'Main Store': 75 },
-  4: { 'Main Kitchen': 200 },
-};
-
-const initialSectionPrices = {
-    1: { 'Main Bar': 2.50, 'Rooftop Bar': 3.00 },
-    2: { 'Main Bar': 8.00, 'Lounge Bar': 9.50 },
-    3: { 'Main Bar': 7.00, 'Rooftop Bar': 9.00, 'Club Section': 10.00 },
-    4: { 'Main Bar': 4.50, 'Lounge Bar': 5.00 },
-};
 
 const ProductManagement = ({ user }) => {
   const [activeTab, setActiveTab] = useState('products');
   const [products, setProducts] = useState([]);
   const [stockLevels, setStockLevels] = useState({});
   const [adjustments, setAdjustments] = useState([]);
+  const [transfers, setTransfers] = useState([]);
   const [sectionPrices, setSectionPrices] = useState({});
   const [allowOverselling, setAllowOverselling] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+
+  const prodCacheKey = () => '';
+  const stockCacheKey = () => '';
+
+  // Rebuild stock levels from backend per-section inventories (root-level so it can be reused)
+  const rebuildSectionStock = async () => {
+    try {
+      const invMap = {};
+      const agg = await api.inventory.aggregate({ branchId: user?.branchId || undefined });
+      (agg || []).forEach((entry) => {
+        const per = entry.perSection || {};
+        invMap[entry.productId] = {};
+        Object.entries(per).forEach(([secName, qty]) => {
+          invMap[entry.productId][secName] = qty;
+        });
+      });
+      if (Object.keys(invMap).length > 0) {
+        setStockLevels(invMap);
+        return invMap;
+      }
+      // Fallback: scan all sections and build map manually
+      try {
+        const sections = await api.sections.list({ branchId: user?.branchId || undefined });
+        const manual = {};
+        await Promise.all((sections || []).map(async (s) => {
+          const rows = await api.inventory.listBySection({ sectionId: s.id });
+          (rows || []).forEach((row) => {
+            if (!manual[row.productId]) manual[row.productId] = {};
+            manual[row.productId][s.name] = row.qtyOnHand;
+          });
+        }));
+        if (Object.keys(manual).length > 0) {
+          setStockLevels(manual);
+          return manual;
+        }
+      } catch {}
+      // Fallback 2: branch-level inventory
+      try {
+        const branchInv = await api.inventory.list({ branchId: user?.branchId || undefined });
+        const byProduct = {};
+        (branchInv || []).forEach((row) => {
+          if (!byProduct[row.productId]) byProduct[row.productId] = {};
+          byProduct[row.productId]['Branch'] = (byProduct[row.productId]['Branch'] || 0) + Number(row.qtyOnHand || 0);
+        });
+        if (Object.keys(byProduct).length > 0) {
+          setStockLevels(byProduct);
+          return byProduct;
+        }
+      } catch {}
+      // keep existing state if nothing found
+      return undefined;
+    } catch (e) {
+      // fallback ignored
+    }
+  };
+
+  // Build sectionPrices map: { [productId]: { [sectionName]: priceNumber } }
+  const rebuildSectionPrices = async () => {
+    try {
+      const sections = await api.sections.list({ branchId: user?.branchId || undefined });
+      const result = {};
+      await Promise.all((sections || []).map(async (s) => {
+        const map = await api.prices.effective({ branchId: user?.branchId || undefined, sectionId: s.id });
+        // map: { productId: number }
+        Object.entries(map || {}).forEach(([pid, price]) => {
+          if (!result[pid]) result[pid] = {};
+          const n = Number(price);
+          result[pid][s.name] = Number.isFinite(n) ? n : 0;
+        });
+      }));
+      setSectionPrices(result);
+      return result;
+    } catch (e) {
+      // leave previous prices if any
+      return undefined;
+    }
+  };
 
   useEffect(() => {
-    const savedProducts = localStorage.getItem('loungeProducts');
-    const savedStockLevels = localStorage.getItem('loungeStockLevels');
-    const savedAdjustments = localStorage.getItem('loungeStockAdjustments');
-    const savedSectionPrices = localStorage.getItem('loungeSectionPrices');
-    const savedOverselling = localStorage.getItem('loungeAllowOverselling');
-
-    const initialProd = savedProducts ? JSON.parse(savedProducts) : initialProducts;
-    const initialStock = savedStockLevels ? JSON.parse(savedStockLevels) : initialStockLevels;
-    const initialAdjustments = savedAdjustments ? JSON.parse(savedAdjustments) : [];
-    const initialPrices = savedSectionPrices ? JSON.parse(savedSectionPrices) : initialSectionPrices;
-
-    setProducts(initialProd);
-    setStockLevels(initialStock);
-    setAdjustments(initialAdjustments);
-    setSectionPrices(initialPrices);
-    setAllowOverselling(savedOverselling === 'true');
-
-    if (!savedProducts) localStorage.setItem('loungeProducts', JSON.stringify(initialProducts));
-    if (!savedStockLevels) localStorage.setItem('loungeStockLevels', JSON.stringify(initialStockLevels));
-    if (!savedAdjustments) localStorage.setItem('loungeStockAdjustments', JSON.stringify([]));
-    if (!savedSectionPrices) localStorage.setItem('loungeSectionPrices', JSON.stringify(initialSectionPrices));
-    if (!savedOverselling) localStorage.setItem('loungeAllowOverselling', 'false');
-  }, []);
+    const load = async () => {
+      try {
+        // Fresh load from backend (let backend derive branch when not provided)
+        const prods = await api.products.list({ branchId: user?.branchId || undefined, includeArchived: showArchived });
+        setProducts(prods || []);
+        // Build stock from section inventories to reflect real quantities
+        const map = await rebuildSectionStock();
+        if (map && Object.keys(map).length > 0) {}
+        // Build section-based prices so ProductView shows persisted values
+        await rebuildSectionPrices();
+      } catch (e) {
+        toast({ title: 'Load failed', description: String(e?.message || e), variant: 'destructive' });
+        // Keep last known products/stock on error
+      }
+      // Strict backend loading for adjustments and settings happens in separate effects
+    };
+    load();
+  }, [user?.branchId, showArchived]);
 
   const updateProducts = (newProducts) => {
     setProducts(newProducts);
-    localStorage.setItem('loungeProducts', JSON.stringify(newProducts));
   };
 
   const updateStockLevels = (newStockLevels) => {
     setStockLevels(newStockLevels);
-    localStorage.setItem('loungeStockLevels', JSON.stringify(newStockLevels));
   };
 
   const updateSectionPrices = (newPrices) => {
     setSectionPrices(newPrices);
-    localStorage.setItem('loungeSectionPrices', JSON.stringify(newPrices));
   };
 
   const addAdjustment = (newAdjustment) => {
-    const currentAdjustments = JSON.parse(localStorage.getItem('loungeStockAdjustments')) || [];
-    const updatedAdjustments = [newAdjustment, ...currentAdjustments];
-    setAdjustments(updatedAdjustments);
-    localStorage.setItem('loungeStockAdjustments', JSON.stringify(updatedAdjustments));
+    // UI append; actual history is loaded from backend in reloadAdjustments()
+    setAdjustments(prev => [newAdjustment, ...prev]);
   };
+
+  // Reload transfers from backend
+  const reloadTransfers = async () => {
+    try {
+      if (!user?.branchId) { setTransfers([]); return; }
+      const res = await (api.inventory?.transfers?.list?.({ branchId: user.branchId }));
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      const mapped = items.map(t => ({
+        id: t.id || `ST-${Date.now()}`,
+        from: t.fromSectionName || t.fromSection || t.from,
+        to: t.toSectionName || t.toSection || t.to,
+        date: t.createdAt || t.date || new Date().toISOString(),
+        status: t.status || 'Completed',
+        items: Array.isArray(t.items) ? t.items.map(it => ({
+          productId: it.productId,
+          name: it.productName || it.name,
+          quantity: it.qty || it.quantity || 0,
+        })) : [],
+      }));
+      setTransfers(mapped);
+    } catch { setTransfers([]); }
+  };
+
+  useEffect(() => { reloadTransfers(); }, [user?.branchId]);
+
+  // Load overselling strictly from backend
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!user?.branchId) { setAllowOverselling(false); return; }
+        let settings = await (api.settings?.get?.({ branchId: user.branchId }));
+        if (!settings && api.inventory?.settings?.get) settings = await api.inventory.settings.get({ branchId: user.branchId });
+        if (settings && Object.prototype.hasOwnProperty.call(settings, 'allowOverselling')) {
+          setAllowOverselling(!!settings.allowOverselling);
+        }
+      } catch {}
+    })();
+  }, [user?.branchId]);
+
+  // Reload adjustments from backend
+  const reloadAdjustments = async () => {
+    try {
+      if (!user?.branchId) { setAdjustments([]); return; }
+      const res = await (api.inventory?.adjustments?.list?.({ branchId: user.branchId }));
+      const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+      // Normalize to current display shape when possible
+      const mapped = items.map(it => ({
+        id: it.id || `SA-${Date.now()}`,
+        productId: it.productId,
+        productName: it.productName || it.name || 'Product',
+        section: it.sectionName || it.section || '',
+        type: it.delta >= 0 ? 'add' : 'remove',
+        quantity: Math.abs(Number(it.delta || it.qty || 0)),
+        reason: it.reason || 'Adjustment',
+        date: it.createdAt || new Date().toISOString(),
+        previousStock: it.previousStock ?? 0,
+        newStock: it.newStock ?? 0,
+      }));
+      setAdjustments(mapped);
+    } catch { setAdjustments([]); }
+  };
+
+  useEffect(() => { reloadAdjustments(); }, [user?.branchId]);
   
-  const handleToggleOverselling = (value) => {
+  const handleToggleOverselling = async (value) => {
     const isAllowed = value === 'true';
-    setAllowOverselling(isAllowed);
-    localStorage.setItem('loungeAllowOverselling', isAllowed ? 'true' : 'false');
-    toast({
-        title: `Overselling ${isAllowed ? 'Enabled' : 'Disabled'}`,
-        description: `You can now ${isAllowed ? '' : 'no longer '}sell products that are out of stock.`,
-    });
+    try {
+      if (!user?.branchId) return;
+      if (api.settings?.update) {
+        await api.settings.update({ branchId: user.branchId, allowOverselling: isAllowed });
+      } else if (api.inventory?.settings?.setAllowOverselling) {
+        await api.inventory.settings.setAllowOverselling({ branchId: user.branchId, allowOverselling: isAllowed });
+      }
+      setAllowOverselling(isAllowed);
+      toast({ title: `Overselling ${isAllowed ? 'Enabled' : 'Disabled'}`, description: `You can now ${isAllowed ? '' : 'no longer '}sell products that are out of stock.` });
+    } catch (e) {
+      toast({ title: 'Failed to update setting', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
   return (
@@ -140,9 +261,9 @@ const ProductManagement = ({ user }) => {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
       >
-        {activeTab === 'products' && <ProductList products={products} setProducts={updateProducts} stockLevels={stockLevels} setStockLevels={updateStockLevels} user={user} addAdjustment={addAdjustment} sectionPrices={sectionPrices} />}
+        {activeTab === 'products' && <ProductList products={products} setProducts={updateProducts} stockLevels={stockLevels} setStockLevels={updateStockLevels} user={user} addAdjustment={addAdjustment} sectionPrices={sectionPrices} rebuildSectionStock={rebuildSectionStock} stockCacheKey={stockCacheKey} prodCacheKey={prodCacheKey} showArchived={showArchived} setShowArchived={setShowArchived} />}
         {activeTab === 'pricing' && <SectionPricing products={products} sectionPrices={sectionPrices} updateSectionPrices={updateSectionPrices} user={user} />}
-        {activeTab === 'transfer' && <StockTransfer user={user} products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} />}
+        {activeTab === 'transfer' && <StockTransfer user={user} products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} rebuildSectionStock={rebuildSectionStock} stockCacheKey={stockCacheKey} transfers={transfers} onTransfersChanged={reloadTransfers} />}
         {activeTab === 'adjustment' && <StockAdjustment products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} adjustments={adjustments} addAdjustment={addAdjustment} />}
       </motion.div>
     </div>
@@ -164,7 +285,7 @@ const TabButton = ({ icon: Icon, label, isActive, onClick }) => (
 );
 
 
-const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user, addAdjustment, sectionPrices }) => {
+const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user, addAdjustment, sectionPrices, rebuildSectionStock, stockCacheKey, prodCacheKey, showArchived, setShowArchived }) => {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isViewModalOpen, setIsViewModalOpen] = useState(false);
   const [isAddStockModalOpen, setIsAddStockModalOpen] = useState(false);
@@ -193,31 +314,78 @@ const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user,
   };
 
   const handleDeleteProduct = (productId) => {
-    const updatedProducts = products.filter(p => p.id !== productId);
-    setProducts(updatedProducts);
-    
-    const newStockLevels = { ...stockLevels };
-    delete newStockLevels[productId];
-    setStockLevels(newStockLevels);
-
-    toast({ title: 'Product Deleted', description: 'The product and its stock have been removed.' });
+    (async () => {
+      try {
+        const resp = await api.products.remove(productId);
+        if (resp && resp.archived) {
+          // Archived due to sales history
+          const updated = products.map(p => p.id === productId ? { ...p, archived: true } : p);
+          setProducts(updated);
+          toast({ title: 'Product Archived', description: 'Product has sales history and was archived instead of deleted.' });
+          try { window.dispatchEvent(new Event('productsChanged')); } catch {}
+        } else {
+          // Fully deleted
+          const remaining = products.filter(p => p.id !== productId);
+          setProducts(remaining);
+          const ns = { ...stockLevels };
+          delete ns[productId];
+          setStockLevels(ns);
+          if (user?.branchId) {}
+          toast({ title: 'Product Deleted', description: 'The product and its stock have been removed.' });
+          try { window.dispatchEvent(new Event('productsChanged')); } catch {}
+        }
+      } catch (e) {
+        toast({ title: 'Delete failed', description: String(e?.message || e), variant: 'destructive' });
+      }
+    })();
   };
-
-  const handleSaveProduct = (productData, initialStock, branchSection) => {
-    if (editingProduct) {
-      const updatedProducts = products.map(p => p.id === editingProduct.id ? { ...p, ...productData } : p);
-      setProducts(updatedProducts);
-      toast({ title: 'Product Updated', description: 'Product details have been saved.' });
-    } else {
-      const newId = Date.now();
-      const newProduct = { id: newId, ...productData };
-      const updatedProducts = [...products, newProduct];
-      setProducts(updatedProducts);
-
-      const newStockLevels = { ...stockLevels, [newId]: { [branchSection]: initialStock } };
-      setStockLevels(newStockLevels);
-
-      toast({ title: 'Product Added', description: 'A new product has been created.' });
+  const handleSaveProduct = async (productData, initialStock, branchSection, imageFile) => {
+    try {
+      if (editingProduct) {
+        await api.products.update(editingProduct.id, {
+          name: productData.name,
+          category: productData.category,
+          subCategory: productData.subCategory,
+        });
+        // Upload image if provided
+        if (imageFile) {
+          try { await api.products.uploadImage(editingProduct.id, imageFile); } catch (e) { toast({ title: 'Image upload failed', description: String(e?.message || e) }); }
+        }
+        const refreshed = await api.products.list({ branchId: user?.branchId || undefined });
+        setProducts(refreshed || []);
+        toast({ title: 'Product Updated', description: 'Product details have been saved.' });
+        try { window.dispatchEvent(new Event('productsChanged')); } catch {}
+      } else {
+        const created = await api.products.create({
+          name: productData.name,
+          category: productData.category,
+          subCategory: productData.subCategory,
+          price: '0',
+          taxRate: '0',
+          branchId: user?.branchId || undefined,
+          productTypeId: productData.productTypeId,
+          // Prefer names at API boundary when available
+          productTypeName: (() => {
+            try {
+              const pt = (window.__lastProductTypes || []).find?.(p => p.id === productData.productTypeId);
+              return pt?.name;
+            } catch { return undefined; }
+          })(),
+          initialSectionId: branchSection || undefined,
+          initialQty: String(parseInt(initialStock, 10) || 0),
+        });
+        if (imageFile && created?.id) {
+          try { await api.products.uploadImage(created.id, imageFile); } catch (e) { toast({ title: 'Image upload failed', description: String(e?.message || e) }); }
+        }
+        const prods = await api.products.list({ branchId: user?.branchId || undefined });
+        setProducts(prods || []);
+        const map = await rebuildSectionStock();
+        if (map) {}
+        toast({ title: 'Product Added', description: 'A new product has been created.' });
+        try { window.dispatchEvent(new Event('productsChanged')); } catch {}
+      }
+    } catch (e) {
+      toast({ title: 'Save failed', description: String(e?.message || e), variant: 'destructive' });
     }
     setIsAddModalOpen(false);
   };
@@ -239,15 +407,36 @@ const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user,
   return (
     <>
       <div className="flex items-center justify-between mb-6">
-          <h3 className="text-xl font-semibold">Product List</h3>
-          <Button onClick={handleAddProduct} className="gap-2">
-            <PlusCircle className="w-4 h-4" />
-            Add Product
-          </Button>
+          <div className="flex items-center gap-4">
+            <h3 className="text-xl font-semibold">Product List</h3>
+            <div className="flex items-center gap-2 text-sm">
+              <Label htmlFor="show-archived">Show Archived</Label>
+              <Switch id="show-archived" checked={showArchived} onCheckedChange={setShowArchived} />
+            </div>
+          </div>
+          <RequirePermission perms={user?.permissions} anyOf={["add_product"]}>
+            <Button onClick={handleAddProduct} className="gap-2">
+              <PlusCircle className="w-4 h-4" />
+              Add Product
+            </Button>
+          </RequirePermission>
+      </div>
+
+      {/* Product Overview section (table with search/filter/sort/pagination) */}
+      <div className="mb-8">
+        <ProductOverview
+          products={products.filter(p => showArchived ? true : !p.archived)}
+          stockLevels={stockLevels}
+          onAdd={handleAddProduct}
+          onEdit={handleEditProduct}
+          onDelete={handleDeleteProduct}
+          onView={handleViewProduct}
+          user={user}
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-        {products.map((product, index) => (
+        {products.filter(p => showArchived ? true : !p.archived).map((product, index) => (
           <motion.div
             key={product.id}
             initial={{ opacity: 0, scale: 0.95 }}
@@ -256,14 +445,30 @@ const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user,
           >
             <Card className="glass-effect border-2 border-white/30 dark:border-slate-700/50 flex flex-col h-full">
               <CardHeader>
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-16 h-16 rounded-md border overflow-hidden flex items-center justify-center bg-muted">
+                    {product.imageUrl ? (
+                      (() => {
+                        const base = getApiBaseUrl();
+                        const u = product.imageUrl;
+                        const abs = /^https?:\/\//i.test(u) ? u : `${base}${u?.startsWith('/') ? '' : '/'}${u || ''}`;
+                        return (<img src={abs} alt={product.name} className="w-full h-full object-cover" />);
+                      })()
+                    ) : (
+                      <Package className="w-6 h-6 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="flex-1 text-right">
+                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${getStationColor(product.station)}`}>
+                      {product.station?.toUpperCase()}
+                    </span>
+                  </div>
+                </div>
                 <div className="flex justify-between items-start">
                   <CardTitle className="text-lg">{product.name}</CardTitle>
-                  <span className={`text-xs font-bold px-2 py-1 rounded-full ${getStationColor(product.station)}`}>
-                    {product.station?.toUpperCase()}
-                  </span>
                 </div>
                 <div className="text-sm text-muted-foreground space-y-1">
-                    <p className="flex items-center gap-1.5"><Package className="w-3.5 h-3.5" /> {product.category}</p>
+                    <p className="flex items-center gap-1.5"><Package className="w-3.5 h-3.5" /> {product.category}{product.subCategory ? ` / ${product.subCategory}` : ''}</p>
                     <p className="flex items-center gap-1.5"><Award className="w-3.5 h-3.5" /> {product.brand}</p>
                 </div>
               </CardHeader>
@@ -276,9 +481,15 @@ const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user,
                 </div>
                 <div className="flex flex-wrap gap-2 pt-4 mt-4">
                   <Button onClick={() => handleViewProduct(product)} variant="outline" size="sm" className="flex-1"><Eye className="w-3 h-3 mr-1.5" />View</Button>
-                  <Button onClick={() => handleAddStock(product)} variant="outline" size="sm" className="flex-1"><Plus className="w-3 h-3 mr-1.5" />Add Stock</Button>
-                  <Button onClick={() => handleEditProduct(product)} variant="outline" size="sm" className="flex-1"><Edit className="w-3 h-3 mr-1.5" />Edit</Button>
-                  <Button onClick={() => handleDeleteProduct(product.id)} variant="destructive" size="sm" className="flex-1"><Trash2 className="w-3 h-3 mr-1.5" />Delete</Button>
+                  <RequirePermission perms={user?.permissions} anyOf={["stock_adjustment"]}>
+                    <Button onClick={() => handleAddStock(product)} variant="outline" size="sm" className="flex-1"><Plus className="w-3 h-3 mr-1.5" />Add Stock</Button>
+                  </RequirePermission>
+                  <RequirePermission perms={user?.permissions} anyOf={["edit_product"]}>
+                    <Button onClick={() => handleEditProduct(product)} variant="outline" size="sm" className="flex-1"><Edit className="w-3 h-3 mr-1.5" />Edit</Button>
+                  </RequirePermission>
+                  <RequirePermission perms={user?.permissions} anyOf={["delete_product"]}>
+                    <Button onClick={() => handleDeleteProduct(product.id)} variant="destructive" size="sm" className="flex-1"><Trash2 className="w-3 h-3 mr-1.5" />Delete</Button>
+                  </RequirePermission>
                 </div>
               </CardContent>
             </Card>
@@ -287,61 +498,113 @@ const ProductList = ({ products, setProducts, stockLevels, setStockLevels, user,
       </div>
       <ProductFormModal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} onSave={handleSaveProduct} product={editingProduct} user={user} />
       <ProductViewModal isOpen={isViewModalOpen} onClose={() => setIsViewModalOpen(false)} product={viewingProduct} stockLevels={stockLevels} sectionPrices={sectionPrices} />
-      <AddStockModal isOpen={isAddStockModalOpen} onClose={() => setIsAddStockModalOpen(false)} product={stockingProduct} stockLevels={stockLevels} updateStockLevels={setStockLevels} addAdjustment={addAdjustment} user={user} />
+      <AddStockModal isOpen={isAddStockModalOpen} onClose={() => setIsAddStockModalOpen(false)} product={stockingProduct} stockLevels={stockLevels} updateStockLevels={setStockLevels} addAdjustment={addAdjustment} user={user} rebuild={rebuildSectionStock} stockCacheKeyFn={stockCacheKey} />
     </>
   );
 };
 
 const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
-  const [formData, setFormData] = useState({ name: '', category: '', brand: '', stock: '', station: '', branchSection: '' });
+  const [formData, setFormData] = useState({ name: '', category: '', subCategory: '', brand: '', stock: '', productTypeId: '', branchSection: '' });
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState('');
   const [categories, setCategories] = useState([]);
+  const [subCategories, setSubCategories] = useState([]);
   const [brands, setBrands] = useState([]);
   const [allBranchSections, setAllBranchSections] = useState([]);
   const [availableSections, setAvailableSections] = useState([]);
+  const [productTypes, setProductTypes] = useState([]);
 
   useEffect(() => {
-    if (isOpen && user && user.branchId) {
-      const savedCategories = JSON.parse(localStorage.getItem('loungeCategories')) || [];
-      const savedBrands = JSON.parse(localStorage.getItem('loungeBrands')) || [];
-      const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-      
-      const currentBranch = allBranches.find(b => b.id.toString() === user.branchId.toString());
-      const sections = currentBranch ? currentBranch.sections || [] : [];
-      setAllBranchSections(sections);
+    const load = async () => {
+      if (isOpen && user) {
+        // Strict backend: load option lists from API, let backend derive branch when needed
+        try {
+          const res = await api.categories.list({ branchId: user?.branchId || undefined });
+          const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+          setCategories(items.map(c => ({ id: c.id, name: c.name })));
+        } catch { setCategories([]); }
+        try {
+          const res = await api.subcategories?.list?.({ branchId: user?.branchId || undefined });
+          const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+          setSubCategories(items.map(sc => ({ id: sc.id, name: sc.name })));
+        } catch { setSubCategories([]); }
+        try {
+          const res = await api.brands?.list?.({ branchId: user?.branchId || undefined });
+          const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+          setBrands(items.map(b => ({ id: b.id, name: b.name })));
+        } catch { setBrands([]); }
+        try {
+          const sections = await api.sections.list({ branchId: user?.branchId || undefined });
+          setAllBranchSections(Array.isArray(sections) ? sections : []);
+        } catch {
+          setAllBranchSections([]);
+        }
+        try {
+          const pts = await api.productTypes.list({ branchId: user?.branchId || undefined });
+          const items = Array.isArray(pts?.items) ? pts.items : (Array.isArray(pts) ? pts : []);
+          setProductTypes(items);
+        } catch {
+          setProductTypes([]);
+        }
 
-      setCategories(savedCategories);
-      setBrands(savedBrands);
-
-      if (product) {
-        setFormData({ 
-          name: product.name || '', 
-          category: product.category || '', 
-          brand: product.brand || '', 
-          stock: '', // Not editable here
-          station: product.station || '',
-          branchSection: '' // Not editable here
-        });
-      } else {
-        setFormData({ name: '', category: '', brand: '', stock: '', station: '', branchSection: '' });
+        if (product) {
+          setFormData({ 
+            name: product.name || '', 
+            category: product.category || '', 
+            subCategory: product.subCategory || '', 
+            brand: product.brand || '', 
+            stock: '', 
+            productTypeId: product.productTypeId || '',
+            branchSection: '' 
+          });
+          // Show existing product image; absolutize relative URLs for preview
+          try {
+            const base = getApiBaseUrl();
+            const raw = product.imageUrl || '';
+            const abs = /^https?:\/\//i.test(raw) ? raw : (raw ? `${base}${raw.startsWith('/') ? '' : '/'}${raw}` : '');
+            setImagePreview(abs);
+          } catch {
+            setImagePreview(product.imageUrl || '');
+          }
+        } else {
+          setFormData({ name: '', category: '', subCategory: '', brand: '', stock: '', productTypeId: '', branchSection: '' });
+          setImagePreview('');
+          setImageFile(null);
+        }
       }
-    }
+    };
+    load();
   }, [product, isOpen, user]);
 
   useEffect(() => {
-    let filteredSections = [];
-    if (formData.station === 'bar') {
-      filteredSections = allBranchSections.filter(sec => sec.name.toLowerCase().includes('store'));
-    } else if (formData.station === 'kitchen') {
-      filteredSections = allBranchSections.filter(sec => sec.name.toLowerCase().includes('kitchen'));
-    } else if (formData.station === 'neutral') {
-      filteredSections = allBranchSections;
-    }
-    setAvailableSections(filteredSections);
-
-    if (formData.branchSection && !filteredSections.find(s => s.name === formData.branchSection)) {
-        handleSelectChange('branchSection', '');
-    }
-  }, [formData.station, allBranchSections]);
+    (async () => {
+      if (!isOpen) return;
+      if (!formData.productTypeId) { setAvailableSections([]); return; }
+      const pt = productTypes.find(p => p.id === formData.productTypeId);
+      try {
+        // Trust backend to compute allowed sections from links
+        const resp = await api.sections.listAllowed({ branchId: user?.branchId || undefined, productTypeId: formData.productTypeId });
+        let list = Array.isArray(resp?.items) ? resp.items : (Array.isArray(resp) ? resp : []);
+        // If empty and product type is explicitly neutral (no links), show all sections
+        const isNeutral = Array.isArray(pt?.productTypeLinks) && pt.productTypeLinks.length === 0;
+        if ((!list || list.length === 0) && isNeutral) {
+          try {
+            const secsAll = await api.sections.list({ branchId: user?.branchId || undefined });
+            list = Array.isArray(secsAll) ? secsAll : [];
+          } catch { list = []; }
+        }
+        setAvailableSections(list || []);
+        if (formData.branchSection && !(list || []).find(s => s.id === formData.branchSection)) {
+          handleSelectChange('branchSection', '');
+        }
+      } catch {
+        // On error, keep empty unless type is explicitly neutral; then show all
+        const isNeutral = Array.isArray(pt?.productTypeLinks) && pt.productTypeLinks.length === 0;
+        setAvailableSections(isNeutral ? (allBranchSections || []) : []);
+        if (!isNeutral && formData.branchSection) handleSelectChange('branchSection', '');
+      }
+    })();
+  }, [formData.productTypeId, isOpen, user, productTypes, allBranchSections]);
 
 
   const handleChange = (e) => {
@@ -353,16 +616,13 @@ const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
   
-  const handleStationChange = (station) => {
-    setFormData(prev => ({ ...prev, station, branchSection: '' }));
-  };
 
   const handleSubmit = () => {
     const { stock, branchSection, ...productData } = formData;
     
     if (!product) { // Only for new products
-        if (!formData.station) {
-            toast({ title: "Station Required", description: "Please select a station (Bar, Kitchen, or Neutral).", variant: "destructive" });
+        if (!formData.productTypeId) {
+            toast({ title: "Product Type Required", description: "Please select a product type.", variant: "destructive" });
             return;
         }
         if (!branchSection) {
@@ -377,10 +637,10 @@ const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
 
     const processedData = {
         ...productData,
-        is_kitchen_item: formData.station === 'kitchen',
-        is_bar_item: formData.station === 'bar',
+        // base price removed; pricing will be managed in Section Pricing
+        productTypeId: formData.productTypeId || undefined,
     };
-    onSave(processedData, parseInt(stock, 10) || 0, branchSection);
+    onSave(processedData, parseInt(stock, 10) || 0, branchSection, imageFile);
   };
   
   return (
@@ -393,6 +653,35 @@ const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
+          {/* Image upload with 1:1 ratio preview (fits product card) */}
+          <div className="grid grid-cols-4 items-start gap-4">
+            <Label className="text-right">Image</Label>
+            <div className="col-span-3">
+              <div className="w-32 h-32 rounded-md border bg-muted overflow-hidden flex items-center justify-center">
+                {imagePreview ? (
+                  <img src={imagePreview} alt="preview" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="text-xs text-muted-foreground">1:1 image</div>
+                )}
+              </div>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  setImageFile(f || null);
+                  if (f) {
+                    const url = URL.createObjectURL(f);
+                    setImagePreview(url);
+                  } else {
+                    setImagePreview('');
+                  }
+                }}
+                className="mt-2 text-sm"
+              />
+              <p className="text-xs text-muted-foreground mt-1">Square image recommended (1:1), e.g., 512×512. Fits product cards.</p>
+            </div>
+          </div>
           <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="name" className="text-right">Name</Label>
             <Input id="name" value={formData.name} onChange={handleChange} className="col-span-3" />
@@ -409,6 +698,17 @@ const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
             </Select>
           </div>
           <div className="grid grid-cols-4 items-center gap-4">
+            <Label htmlFor="subCategory" className="text-right">Sub Category</Label>
+            <Select value={formData.subCategory} onValueChange={(value) => handleSelectChange('subCategory', value)}>
+                <SelectTrigger className="col-span-3">
+                    <SelectValue placeholder="Select a sub category" />
+                </SelectTrigger>
+                <SelectContent>
+                    {subCategories.map(sc => <SelectItem key={sc.id} value={sc.name}>{sc.name}</SelectItem>)}
+                </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="brand" className="text-right">Brand</Label>
             <Select value={formData.brand} onValueChange={(value) => handleSelectChange('brand', value)}>
                 <SelectTrigger className="col-span-3">
@@ -419,34 +719,29 @@ const ProductFormModal = ({ isOpen, onClose, onSave, product, user }) => {
                 </SelectContent>
             </Select>
           </div>
+          {/* Base Price removed; price will be assigned per-section via Section Pricing */}
            <div className="grid grid-cols-4 items-center gap-4">
-            <Label htmlFor="station" className="text-right">Station</Label>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="col-span-3 justify-start capitalize" disabled={!!product}>
-                  {formData.station ? formData.station : 'Select station'}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-[--radix-dropdown-menu-trigger-width]">
-                {['bar', 'kitchen', 'neutral'].map(station => (
-                   <DropdownMenuItem key={station} onSelect={() => handleStationChange(station)} className="capitalize">
-                     {station}
-                   </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Label htmlFor="productType" className="text-right">Product Type</Label>
+            <Select value={formData.productTypeId} onValueChange={(value) => handleSelectChange('productTypeId', value)}>
+              <SelectTrigger className="col-span-3">
+                <SelectValue placeholder="Select a product type" />
+              </SelectTrigger>
+              <SelectContent>
+                {productTypes.map(pt => <SelectItem key={pt.id} value={pt.id}>{pt.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </div>
           {!product && (
             <>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="branchSection" className="text-right">Branch Section</Label>
-                <Select value={formData.branchSection} onValueChange={(value) => handleSelectChange('branchSection', value)} disabled={!formData.station}>
-                    <SelectTrigger className="col-span-3">
-                        <SelectValue placeholder="Select a section" />
-                    </SelectTrigger>
-                    <SelectContent>
-                        {availableSections.map(sec => <SelectItem key={sec.id} value={sec.name}>{sec.name}</SelectItem>)}
-                    </SelectContent>
+                <Select value={formData.branchSection} onValueChange={(value) => handleSelectChange('branchSection', value)} disabled={availableSections.length === 0}>
+                  <SelectTrigger className="col-span-3">
+                      <SelectValue placeholder="Select a section" />
+                  </SelectTrigger>
+                  <SelectContent>
+                      {availableSections.map(sec => <SelectItem key={sec.id} value={sec.id}>{sec.name}</SelectItem>)}
+                  </SelectContent>
                 </Select>
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
@@ -526,19 +821,24 @@ const ProductViewModal = ({ isOpen, onClose, product, stockLevels, sectionPrices
   );
 };
 
-const AddStockModal = ({ isOpen, onClose, product, stockLevels, updateStockLevels, addAdjustment, user }) => {
+const AddStockModal = ({ isOpen, onClose, product, stockLevels, updateStockLevels, addAdjustment, user, rebuild, stockCacheKeyFn }) => {
   const [section, setSection] = useState('');
   const [quantity, setQuantity] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [time, setTime] = useState(new Date().toTimeString().slice(0, 5));
-  const [branchSections, setBranchSections] = useState([]);
+  const [branchSections, setBranchSections] = useState([]); // {id, name}
 
   useEffect(() => {
-    if (isOpen && user && user.branchId) {
-      const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-      const currentBranch = allBranches.find(b => b.id.toString() === user.branchId.toString());
-      setBranchSections(currentBranch ? currentBranch.sections || [] : []);
-    }
+    (async () => {
+      if (isOpen && user && user.branchId) {
+        try {
+          const secs = await api.sections.list({ branchId: user.branchId });
+          setBranchSections((secs || []).map(s => ({ id: s.id, name: s.name })));
+        } catch {
+          setBranchSections([]);
+        }
+      }
+    })();
     if (!isOpen) {
       setSection('');
       setQuantity('');
@@ -549,37 +849,51 @@ const AddStockModal = ({ isOpen, onClose, product, stockLevels, updateStockLevel
 
   if (!product) return null;
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const qty = Number(quantity);
     if (!section || !qty || qty <= 0) {
       toast({ title: 'Invalid Input', description: 'Please select a section and enter a valid quantity.', variant: 'destructive' });
       return;
     }
 
-    const newStockLevels = JSON.parse(JSON.stringify(stockLevels));
-    const currentStock = newStockLevels[product.id]?.[section] || 0;
-    const newStock = currentStock + qty;
+    try {
+      // Persist to backend using sectionName + branchId
+      const selectedSec = branchSections.find(s => s.id === section);
+      const secNameForCall = selectedSec ? selectedSec.name : section;
+      await api.inventory.adjustInSection({ productId: product.id, sectionName: secNameForCall, branchId: user?.branchId || undefined, delta: qty });
 
-    if (!newStockLevels[product.id]) newStockLevels[product.id] = {};
-    newStockLevels[product.id][section] = newStock;
-    updateStockLevels(newStockLevels);
+      // Rebuild from backend and update cache
+      const invMap = await (async () => {
+        const map = await rebuild?.();
+        if (user?.branchId && map && Object.keys(map).length > 0 && typeof stockCacheKeyFn === 'function') {
+          localStorage.setItem(stockCacheKeyFn(user.branchId), JSON.stringify(map));
+        }
+        return map;
+      })();
 
-    const newAdjustment = {
-      id: `SA-${Date.now()}`,
-      productId: product.id,
-      productName: product.name,
-      section,
-      type: 'add',
-      quantity: qty,
-      reason: 'Stock Purchase/Receiving',
-      date: `${date}T${time}:00`,
-      previousStock: currentStock,
-      newStock,
-    };
+      const selected = branchSections.find(s => s.id === section);
+      const sectionName = selected ? selected.name : section;
+      const currentStock = (invMap && invMap[product.id]?.[sectionName]) || 0;
+      const newStock = currentStock; // already rebuilt from backend
 
-    addAdjustment(newAdjustment);
-    toast({ title: 'Stock Added!', description: `${qty} units of ${product.name} added to ${section}.` });
-    onClose();
+      const newAdjustment = {
+        id: `SA-${Date.now()}`,
+        productId: product.id,
+        productName: product.name,
+        section: sectionName,
+        type: 'add',
+        quantity: qty,
+        reason: 'Stock Purchase/Receiving',
+        date: `${date}T${time}:00`,
+        previousStock: currentStock,
+        newStock,
+      };
+      addAdjustment(newAdjustment);
+      toast({ title: 'Stock Added!', description: `${qty} units of ${product.name} added to ${sectionName}.` });
+      onClose();
+    } catch (e) {
+      toast({ title: 'Add stock failed', description: String(e?.message || e), variant: 'destructive' });
+    }
   };
 
   return (
@@ -594,7 +908,7 @@ const AddStockModal = ({ isOpen, onClose, product, stockLevels, updateStockLevel
             <Label>Section</Label>
             <Select value={section} onValueChange={setSection}>
               <SelectTrigger><Warehouse className="w-4 h-4 mr-2" /><SelectValue placeholder="Select a section" /></SelectTrigger>
-              <SelectContent>{branchSections.map(s => <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>)}</SelectContent>
+              <SelectContent>{branchSections.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div className="space-y-2">
@@ -622,59 +936,92 @@ const AddStockModal = ({ isOpen, onClose, product, stockLevels, updateStockLevel
 
 const SectionPricing = ({ products, sectionPrices, updateSectionPrices, user }) => {
     const [selectedProduct, setSelectedProduct] = useState(null);
-    const [prices, setPrices] = useState({});
-    const [sellingSections, setSellingSections] = useState([]);
+    const [prices, setPrices] = useState({}); // key: sectionId, value: price string
+    const [sellingSections, setSellingSections] = useState([]); // array of {id, name}
+    const [loadingSections, setLoadingSections] = useState(false);
+    const [loadingPrices, setLoadingPrices] = useState(false);
+    const [saving, setSaving] = useState(false);
 
+    // Load selling sections from backend (exclude store/kitchen/production sections)
     useEffect(() => {
-        if (user && user.branchId) {
-            const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-            const currentBranch = allBranches.find(b => b.id.toString() === user.branchId.toString());
-            if (currentBranch && currentBranch.sections) {
-                const sections = currentBranch.sections.filter(s => {
-                    const nameLower = s.name.toLowerCase();
-                    return !nameLower.includes('store') && !nameLower.includes('kitchen');
-                });
-                setSellingSections(sections);
-            }
-        }
-    }, [user]);
+        (async () => {
+            setLoadingSections(true);
+            // Allow backend to derive branch if not provided
+            try {
+                const secs = await api.sections.list({ branchId: user?.branchId || undefined });
+                const norm = (s) => String(s || '').toUpperCase();
+                const classify = (fn, name) => {
+                    const f = norm(fn);
+                    const n = norm(name);
+                    if (f.includes('STORE') || n.includes('STORE')) return 'STORE';
+                    if (f.includes('KITCHEN') || n.includes('KITCHEN')) return 'KITCHEN';
+                    return 'SALES';
+                };
+                const selling = (secs || []).filter(s => classify(s.function, s.name) === 'SALES');
+                setSellingSections(selling);
+            } catch {
+                setSellingSections([]);
+            } finally { setLoadingSections(false); }
+        })();
+    }, [user?.branchId]);
 
+    // When a product is selected, load effective prices per section for that product
     useEffect(() => {
-        if (selectedProduct) {
-            const productPrices = sectionPrices[selectedProduct.id] || {};
-            const initialPrices = {};
-            sellingSections.forEach(section => {
-                initialPrices[section.name] = productPrices[section.name] || '';
-            });
-            setPrices(initialPrices);
-        } else {
-            setPrices({});
-        }
-    }, [selectedProduct, sectionPrices, sellingSections]);
+        (async () => {
+            if (!selectedProduct) { setPrices({}); return; }
+            const next = {};
+            try {
+                setLoadingPrices(true);
+                await Promise.all((sellingSections || []).map(async (sec) => {
+                    const map = await api.prices.effective({ branchId: user?.branchId || undefined, sectionId: sec.id });
+                    const val = map ? map[selectedProduct.id] : undefined;
+                    next[sec.id] = (val !== undefined && val !== null) ? String(val) : '';
+                }));
+            } catch {
+                // fallback to empty
+            } finally { setLoadingPrices(false); }
+            setPrices(next);
+        })();
+    }, [selectedProduct, sellingSections, user?.branchId]);
 
-    const handlePriceChange = (sectionName, value) => {
-        setPrices(prev => ({ ...prev, [sectionName]: value }));
+    const handlePriceChange = (sectionId, value) => {
+        setPrices(prev => ({ ...prev, [sectionId]: value }));
     };
 
-    const handleSavePrices = () => {
+    const handleSavePrices = async () => {
         if (!selectedProduct) return;
-
-        const newSectionPrices = { ...sectionPrices };
-        if (!newSectionPrices[selectedProduct.id]) {
-            newSectionPrices[selectedProduct.id] = {};
-        }
-
-        Object.entries(prices).forEach(([sectionName, price]) => {
-            const priceValue = parseFloat(price);
-            if (!isNaN(priceValue) && priceValue >= 0) {
-                newSectionPrices[selectedProduct.id][sectionName] = priceValue;
-            } else {
-                delete newSectionPrices[selectedProduct.id][sectionName];
+        try {
+            setSaving(true);
+            // Persist per-section via backend
+            for (const sec of sellingSections) {
+                const raw = prices[sec.id];
+                const priceValue = parseFloat(raw);
+                if (!isNaN(priceValue) && priceValue >= 0) {
+                    await api.priceLists.upsertEntries({
+                        branchId: user?.branchId || undefined,
+                        sectionId: sec.id,
+                        entries: [{ productId: selectedProduct.id, price: String(priceValue) }],
+                    });
+                }
             }
-        });
 
-        updateSectionPrices(newSectionPrices);
-        toast({ title: 'Prices Updated', description: `Prices for ${selectedProduct.name} have been saved.` });
+            // Update local UI cache so ProductView modal shows latest values (by section name)
+            const newSectionPrices = { ...sectionPrices };
+            if (!newSectionPrices[selectedProduct.id]) newSectionPrices[selectedProduct.id] = {};
+            for (const sec of sellingSections) {
+                const raw = prices[sec.id];
+                const priceValue = parseFloat(raw);
+                if (!isNaN(priceValue) && priceValue >= 0) newSectionPrices[selectedProduct.id][sec.name] = priceValue;
+            }
+            updateSectionPrices(newSectionPrices);
+
+            toast({ title: 'Prices Updated', description: `Prices for ${selectedProduct.name} have been saved.` });
+            // reset selection for next product
+            setSelectedProduct(null);
+            setPrices({});
+        } catch (e) {
+            toast({ title: 'Save failed', description: String(e?.message || e), variant: 'destructive' });
+        } finally { setSaving(false); }
     };
 
     return (
@@ -684,91 +1031,108 @@ const SectionPricing = ({ products, sectionPrices, updateSectionPrices, user }) 
                 <CardDescription>Set different prices for products in each selling section.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-                <div className="flex items-center gap-4">
-                    <Label className="w-24">Product</Label>
-                    <Select onValueChange={value => setSelectedProduct(products.find(p => p.id.toString() === value))}>
-                        <SelectTrigger className="flex-1">
-                            <SelectValue placeholder="Select a product to set prices" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            {products.map(p => <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>)}
-                        </SelectContent>
-                    </Select>
-                </div>
-
-                {selectedProduct && (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4 pt-4 border-t">
-                        <h4 className="font-semibold">Set prices for "{selectedProduct.name}"</h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {sellingSections.map(section => (
-                                <div key={section.id} className="flex items-center gap-2">
-                                    <Label htmlFor={`price-${section.id}`} className="w-32 truncate">{section.name}</Label>
-                                    <div className="relative flex-1">
-                                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                                        <Input
-                                            id={`price-${section.id}`}
-                                            type="number"
-                                            step="0.01"
-                                            min="0"
-                                            placeholder="e.g., 12.50"
-                                            value={prices[section.name] || ''}
-                                            onChange={e => handlePriceChange(section.name, e.target.value)}
-                                            className="pl-8"
-                                        />
+                <div className="grid gap-4">
+                    <div>
+                        <Label>Select Product</Label>
+                        <Select value={selectedProduct?.id || ''} onValueChange={(value) => setSelectedProduct(products.find(p => p.id.toString() === value))}>
+                            <SelectTrigger className="mt-1">
+                                <SelectValue placeholder="Choose a product to edit prices" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {products.map(p => <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>)}
+                            </SelectContent>
+                        </Select>
+                        {loadingSections && (
+                          <p className="text-xs text-muted-foreground mt-2">Loading sections...</p>
+                        )}
+                    </div>
+                    {selectedProduct && (
+                        <>
+                          <div className="space-y-4">
+                              <div className="rounded-lg border p-4">
+                                  <h4 className="font-semibold mb-3">Set Prices by Section</h4>
+                                  {loadingPrices ? (
+                                    <p className="text-sm text-muted-foreground">Loading current prices...</p>
+                                  ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      {sellingSections.map(section => (
+                                          <div key={section.id} className="flex items-center gap-3">
+                                              <Label className="w-40 shrink-0">{section.name}</Label>
+                                              <Input type="number" step="0.01" value={prices[section.id] || ''} onChange={(e) => handlePriceChange(section.id, e.target.value)} placeholder="e.g., 5.00" />
+                                          </div>
+                                      ))}
                                     </div>
-                                </div>
-                            ))}
-                        </div>
-                        <div className="flex justify-end">
-                            <Button onClick={handleSavePrices}>Save Prices</Button>
-                        </div>
-                    </motion.div>
-                )}
+                                  )}
+                              </div>
+                              <div className="flex justify-end">
+                                  <Button onClick={handleSavePrices} disabled={saving}>{saving ? 'Saving...' : 'Save Prices'}</Button>
+                              </div>
+                          </div>
+                        </>
+                    )}
+                </div>
             </CardContent>
         </Card>
     );
 };
 
-const StockTransfer = ({ user, products, stockLevels, updateStockLevels }) => {
+const StockTransfer = ({ user, products, stockLevels, updateStockLevels, rebuildSectionStock, stockCacheKey }) => {
     const [transfers, setTransfers] = useState([]);
-    
-    useEffect(() => {
-        const storedTransfers = JSON.parse(localStorage.getItem('loungeStockTransfers')) || [];
-        setTransfers(storedTransfers.reverse());
-    }, []);
+    const [loading, setLoading] = useState(false);
 
-    const addTransfer = (newTransfer) => {
-        const currentTransfers = JSON.parse(localStorage.getItem('loungeStockTransfers')) || [];
-        const updatedTransfers = [newTransfer, ...currentTransfers];
-        setTransfers(updatedTransfers.reverse());
-        localStorage.setItem('loungeStockTransfers', JSON.stringify(updatedTransfers));
+    const reloadTransfers = async () => {
+        try {
+            setLoading(true);
+            const res = await api.inventory.transfers.list({ branchId: user?.branchId || undefined });
+            const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+            setTransfers(items.map(t => ({
+                id: t.id,
+                from: t.fromSection?.name || t.fromSectionName || t.from || '',
+                to: t.toSection?.name || t.toSectionName || t.to || '',
+                date: t.createdAt || t.date || new Date().toISOString(),
+                items: (t.items || []).map(i => ({ quantity: i.qty ?? i.quantity ?? 0, name: i.product?.name || i.productName || '' })),
+                status: t.status || 'Completed',
+                userName: t.userName || t.user?.username || t.user || undefined,
+            })));
+        } catch {
+            setTransfers([]);
+        } finally { setLoading(false); }
     };
+
+    useEffect(() => { reloadTransfers(); }, [user?.branchId]);
+
+    const addTransfer = async () => { await reloadTransfers(); };
 
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-1">
-                <CreateStockTransferForm onTransferCreated={addTransfer} user={user} products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} />
+                <CreateStockTransferForm onTransferCreated={addTransfer} user={user} products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} rebuild={rebuildSectionStock} stockCacheKeyFn={stockCacheKey} />
             </div>
             <div className="lg:col-span-2">
-                <TransferHistory transfers={transfers} />
+                <TransferHistory transfers={transfers} loading={loading} />
             </div>
         </div>
     );
 };
 
-const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevels, updateStockLevels }) => {
+const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevels, updateStockLevels, rebuild, stockCacheKeyFn }) => {
     const [branchSections, setBranchSections] = useState([]);
     const [items, setItems] = useState([{ productId: '', quantity: '' }]);
-    const [fromSection, setFromSection] = useState('');
-    const [toSection, setToSection] = useState('');
+    const [fromSection, setFromSection] = useState(''); // store sectionId
+    const [toSection, setToSection] = useState('');     // store sectionId
 
     useEffect(() => {
-        if (user && user.branchId) {
-            const allBranches = JSON.parse(localStorage.getItem('loungeBranches')) || [];
-            const currentBranch = allBranches.find(b => b.id.toString() === user.branchId.toString());
-            const sections = currentBranch ? currentBranch.sections || [] : [];
-            setBranchSections(sections);
-        }
+        const load = async () => {
+            if (user) {
+                try {
+                    const secs = await api.sections.list({ branchId: user?.branchId || undefined });
+                    setBranchSections(Array.isArray(secs) ? secs : []);
+                } catch {
+                    setBranchSections([]);
+                }
+            }
+        };
+        load();
     }, [user]);
 
     const handleItemChange = (index, field, value) => {
@@ -780,7 +1144,7 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
     const addItem = () => setItems([...items, { productId: '', quantity: '' }]);
     const removeItem = (index) => setItems(items.filter((_, i) => i !== index));
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         if (!fromSection || !toSection || fromSection === toSection) {
             toast({ title: 'Invalid Sections', description: 'Please select valid and different from/to sections.', variant: 'destructive' });
@@ -796,38 +1160,66 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
         const newStockLevels = JSON.parse(JSON.stringify(stockLevels));
         let isTransferValid = true;
 
+        const fromName = branchSections.find(s => s.id === fromSection)?.name || '';
         validItems.forEach(item => {
             const { productId, quantity } = item;
             const qty = Number(quantity);
-            const currentStock = newStockLevels[productId]?.[fromSection] || 0;
+            const currentStock = newStockLevels[productId]?.[fromName] || 0;
 
             if (currentStock < qty) {
                 const productName = products.find(p => p.id.toString() === productId)?.name || 'Product';
-                toast({ title: 'Insufficient Stock', description: `Not enough ${productName} in ${fromSection}. Available: ${currentStock}, Tried to transfer: ${qty}`, variant: 'destructive' });
+                toast({ title: 'Insufficient Stock', description: `Not enough ${productName} in ${fromName}. Available: ${currentStock}, Tried to transfer: ${qty}`, variant: 'destructive' });
                 isTransferValid = false;
             }
         });
 
         if (!isTransferValid) return;
 
+        // Call backend per-section transfer using section names (with branchId)
+        try {
+            const from = branchSections.find(s => s.id === fromSection);
+            const to = branchSections.find(s => s.id === toSection);
+            if (!from || !to) {
+                toast({ title: 'Sections not found', description: 'Could not resolve section IDs for transfer.', variant: 'destructive' });
+                return;
+            }
+            await api.inventory.transfer({
+                fromSectionId: from.id,
+                toSectionId: to.id,
+                branchId: user?.branchId || undefined,
+                items: validItems.map(it => ({ productId: it.productId, qty: Number(it.quantity) }))
+            });
+            const map = await rebuild?.();
+            if (user?.branchId && map && Object.keys(map).length > 0 && typeof stockCacheKeyFn === 'function') {
+                localStorage.setItem(stockCacheKeyFn(user.branchId), JSON.stringify(map));
+            }
+        } catch (err) {
+            toast({ title: 'Transfer failed', description: String(err?.message || err), variant: 'destructive' });
+            return;
+        }
+
         validItems.forEach(item => {
             const { productId, quantity } = item;
             const qty = Number(quantity);
             
-            newStockLevels[productId][fromSection] -= qty;
-            if (newStockLevels[productId][fromSection] === 0) {
-                delete newStockLevels[productId][fromSection];
+            const fromName = branchSections.find(s => s.id === fromSection)?.name || '';
+            const toName = branchSections.find(s => s.id === toSection)?.name || '';
+            if (!fromName || !toName) return;
+            newStockLevels[productId][fromName] -= qty;
+            if (newStockLevels[productId][fromName] === 0) {
+                delete newStockLevels[productId][fromName];
             }
-
-            newStockLevels[productId][toSection] = (newStockLevels[productId][toSection] || 0) + qty;
+            newStockLevels[productId][toName] = (newStockLevels[productId][toName] || 0) + qty;
         });
 
         updateStockLevels(newStockLevels);
         
+        const fromNameFinal = branchSections.find(s => s.id === fromSection)?.name || '';
+        const toNameFinal = branchSections.find(s => s.id === toSection)?.name || '';
         const newTransfer = {
             id: `ST-${Date.now()}`,
-            from: fromSection,
-            to: toSection,
+            from: fromNameFinal,
+            to: toNameFinal,
             date: new Date().toISOString(),
             items: validItems.map(item => ({...item, name: products.find(p => p.id.toString() === item.productId)?.name})),
             status: 'Completed'
@@ -842,32 +1234,35 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
 
     const getAvailableToSections = () => {
         if (!fromSection) return [];
-        
-        const fromSectionLower = fromSection.toLowerCase();
-        const isStore = (name) => name.toLowerCase().includes('store');
-        const isProduction = (name) => name.toLowerCase().includes('kitchen') || name.toLowerCase().includes('bar');
-        const isSalesSection = (name) => !isStore(name) && !isProduction(name);
-
-        if (isStore(fromSection) && !fromSectionLower.includes('bar')) {
-            // "From" is a main store
-            return branchSections.filter(s => isProduction(s.name) && s.name !== fromSection);
+        const norm = (s) => String(s || '').toUpperCase();
+        const classify = (fn) => {
+          const f = norm(fn);
+          if (f.includes('STORE')) return 'STORE';
+          if (f.includes('BAR') && f.includes('PRODUCTION')) return 'BAR_PRODUCTION';
+          if (f.includes('KITCHEN') && f.includes('PRODUCTION')) return 'KITCHEN_PRODUCTION';
+          if (f.includes('PRODUCTION')) return 'PRODUCTION';
+          if (f.includes('SALES')) return 'SALES_OPERATION';
+          if (f.includes('BAR')) return 'BAR_PRODUCTION';
+          if (f.includes('KITCHEN')) return 'KITCHEN_PRODUCTION';
+          return 'UNKNOWN';
+        };
+        const from = branchSections.find(s => s.id === fromSection);
+        const f = classify(from?.function);
+        if (f === 'STORE') {
+            return branchSections.filter(s => ['BAR_PRODUCTION','KITCHEN_PRODUCTION','PRODUCTION'].includes(classify(s.function)) && s.id !== fromSection);
         }
-        
-        if (isProduction(fromSection)) {
-             // "From" is a production section (bar or kitchen)
-            return branchSections.filter(s => isSalesSection(s.name) && s.name !== fromSection);
+        if (f === 'BAR_PRODUCTION' || f === 'KITCHEN_PRODUCTION' || f === 'PRODUCTION') {
+            return branchSections.filter(s => classify(s.function) === 'SALES_OPERATION' && s.id !== fromSection);
         }
-        
-        if(isSalesSection(fromSection)) {
-            // "From" is another sales section
-            return branchSections.filter(s => isSalesSection(s.name) && s.name !== fromSection);
+        if (f === 'SALES_OPERATION') {
+            return branchSections.filter(s => classify(s.function) === 'SALES_OPERATION' && s.id !== fromSection);
         }
-
-        return branchSections.filter(s => s.name !== fromSection);
-    };
+        return branchSections.filter(s => s.id !== fromSection);
+      };
 
     const availableToSections = getAvailableToSections();
-    const productsInFromSection = fromSection ? products.filter(p => stockLevels[p.id]?.[fromSection] > 0) : [];
+    const fromNameForStock = branchSections.find(s => s.id === fromSection)?.name || '';
+    const productsInFromSection = fromSection ? products.filter(p => stockLevels[p.id]?.[fromNameForStock] > 0) : [];
 
     return (
         <Card className="glass-effect">
@@ -880,12 +1275,12 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
                     <div className="flex items-center gap-2">
                         <Select value={fromSection} onValueChange={val => { setFromSection(val); setToSection(''); }}>
                             <SelectTrigger><Warehouse className="w-4 h-4 mr-2" /> From</SelectTrigger>
-                            <SelectContent>{branchSections.map(s => <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>)}</SelectContent>
+                            <SelectContent>{branchSections.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
                         </Select>
                         <ArrowRight className="w-4 h-4 text-muted-foreground" />
                         <Select value={toSection} onValueChange={setToSection} disabled={!fromSection}>
                             <SelectTrigger><Box className="w-4 h-4 mr-2" /> To</SelectTrigger>
-                            <SelectContent>{availableToSections.map(s => <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>)}</SelectContent>
+                            <SelectContent>{availableToSections.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
                         </Select>
                     </div>
 
@@ -895,7 +1290,7 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
                             <div key={index} className="flex items-center gap-2 p-2 rounded-md border">
                                 <Select value={item.productId} onValueChange={value => handleItemChange(index, 'productId', value)} disabled={!fromSection}>
                                     <SelectTrigger className="flex-1"><Package className="w-4 h-4 mr-2" /><SelectValue placeholder="Product" /></SelectTrigger>
-                                    <SelectContent>{productsInFromSection.map(p => <SelectItem key={p.id} value={p.id.toString()}>{p.name} (Av: {stockLevels[p.id]?.[fromSection]})</SelectItem>)}</SelectContent>
+                                    <SelectContent>{productsInFromSection.map(p => <SelectItem key={p.id} value={p.id.toString()}>{p.name} (Av: {stockLevels[p.id]?.[fromNameForStock]})</SelectItem>)}</SelectContent>
                                 </Select>
                                 <Input type="number" placeholder="Qty" min="1" value={item.quantity} onChange={e => handleItemChange(index, 'quantity', e.target.value)} className="w-24" required />
                                 <Button type="button" variant="destructive" size="icon" onClick={() => removeItem(index)}><Trash2 className="w-4 h-4" /></Button>
@@ -913,7 +1308,7 @@ const CreateStockTransferForm = ({ onTransferCreated, user, products, stockLevel
     );
 };
 
-const TransferHistory = ({ transfers }) => (
+const TransferHistory = ({ transfers, loading = false }) => (
     <Card className="glass-effect">
         <CardHeader>
             <CardTitle>Transfer History</CardTitle>
@@ -921,7 +1316,8 @@ const TransferHistory = ({ transfers }) => (
         </CardHeader>
         <CardContent>
              <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">
-                {transfers.length > 0 ? transfers.map(t => (
+                {loading && <p className="text-center text-muted-foreground py-8">Loading transfers...</p>}
+                {!loading && transfers.length > 0 ? transfers.map(t => (
                     <div key={t.id} className="p-4 rounded-lg border bg-background">
                         <div className="flex justify-between items-start">
                             <div>
@@ -935,6 +1331,9 @@ const TransferHistory = ({ transfers }) => (
                                     <Calendar className="w-3 h-3 mr-1.5 inline" />
                                     {new Date(t.date).toLocaleString()}
                                 </p>
+                                {t.userName && (
+                                  <p className="text-xs text-muted-foreground">by_user: {t.userName}</p>
+                                )}
                             </div>
                             <span className={`px-2 py-1 text-xs rounded-full bg-green-200 text-green-800`}>{t.status}</span>
                         </div>
@@ -947,40 +1346,78 @@ const TransferHistory = ({ transfers }) => (
                             </ul>
                         </div>
                     </div>
-                )) : (
+                )) : (!loading && (
                     <p className="text-center text-muted-foreground py-8">No stock transfers recorded yet.</p>
-                )}
+                ))}
             </div>
         </CardContent>
     </Card>
 );
 
-const StockAdjustment = ({ products, stockLevels, updateStockLevels, adjustments, addAdjustment }) => {
+const StockAdjustment = ({ products, stockLevels, updateStockLevels, adjustments, addAdjustment, user }) => {
+    const [remoteAdjustments, setRemoteAdjustments] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    const reloadAdjustments = async () => {
+        try {
+            setLoading(true);
+            const res = await api.inventory.adjustments.list({ branchId: user?.branchId || undefined });
+            const items = Array.isArray(res?.items) ? res.items : (Array.isArray(res) ? res : []);
+            const mapped = items.map(a => ({
+                id: a.id,
+                productId: a.productId,
+                productName: a.product?.name || a.productName || 'Product',
+                section: a.section?.name || a.sectionName || '',
+                type: (a.delta ?? 0) >= 0 ? 'add' : 'remove',
+                quantity: Math.abs(a.delta ?? a.quantity ?? 0),
+                reason: a.reason || 'Adjustment',
+                date: a.createdAt || a.date || new Date().toISOString(),
+                previousStock: a.previousStock ?? 0,
+                newStock: a.newStock ?? 0,
+                userName: a.userName || a.user?.username || a.user || undefined,
+            }));
+            setRemoteAdjustments(mapped);
+        } catch {
+            setRemoteAdjustments([]);
+        } finally { setLoading(false); }
+    };
+
+    useEffect(() => { reloadAdjustments(); }, [user?.branchId]);
+
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-1">
-                <CreateStockAdjustmentForm products={products} stockLevels={stockLevels} updateStockLevels={updateStockLevels} onAdjustmentCreated={addAdjustment} />
+                <CreateStockAdjustmentForm products={products} user={user} onAdjustmentCreated={reloadAdjustments} />
             </div>
             <div className="lg:col-span-2">
-                <AdjustmentHistory adjustments={adjustments} />
+                <AdjustmentHistory adjustments={remoteAdjustments} loading={loading} />
             </div>
         </div>
     );
 };
 
-const CreateStockAdjustmentForm = ({ products, stockLevels, updateStockLevels, onAdjustmentCreated }) => {
+const CreateStockAdjustmentForm = ({ products, user, onAdjustmentCreated }) => {
     const [productId, setProductId] = useState('');
-    const [section, setSection] = useState('');
+    const [sectionId, setSectionId] = useState('');
     const [type, setType] = useState('add');
     const [quantity, setQuantity] = useState('');
     const [reason, setReason] = useState('');
+    const [sections, setSections] = useState([]);
+    const [saving, setSaving] = useState(false);
 
-    const availableSections = productId ? Object.keys(stockLevels[productId] || {}) : [];
+    useEffect(() => {
+        (async () => {
+            try {
+                const secs = await api.sections.list({ branchId: user?.branchId || undefined });
+                setSections(Array.isArray(secs) ? secs : []);
+            } catch { setSections([]); }
+        })();
+    }, [user?.branchId]);
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         const qty = Number(quantity);
-        if (!productId || !section || !qty || qty <= 0 || !reason) {
+        if (!productId || !sectionId || !qty || qty <= 0 || !reason) {
             toast({ title: 'Invalid Input', description: 'Please fill all fields correctly.', variant: 'destructive' });
             return;
         }
@@ -991,36 +1428,20 @@ const CreateStockAdjustmentForm = ({ products, stockLevels, updateStockLevels, o
             return;
         }
         
-        const newStockLevels = JSON.parse(JSON.stringify(stockLevels));
-        const currentStock = newStockLevels[productId]?.[section] || 0;
-        const newStock = type === 'add' ? currentStock + qty : currentStock - qty;
-
-        if (newStock < 0) {
-            toast({ title: 'Insufficient Stock', description: `Cannot remove ${qty}. Only ${currentStock} available in ${section}.`, variant: 'destructive' });
+        try {
+            setSaving(true);
+            const delta = type === 'add' ? qty : -qty;
+            const secNameForCall = sections.find(s => s.id === sectionId)?.name || sectionId;
+            await api.inventory.adjustInSection({ productId, sectionName: secNameForCall, branchId: user?.branchId || undefined, delta, reason });
+            toast({ title: 'Stock Adjusted!', description: `${product.name} stock updated.` });
+            await onAdjustmentCreated?.();
+        } catch (e) {
+            toast({ title: 'Adjustment failed', description: String(e?.message || e), variant: 'destructive' });
             return;
-        }
+        } finally { setSaving(false); }
 
-        if (!newStockLevels[productId]) newStockLevels[productId] = {};
-        newStockLevels[productId][section] = newStock;
-        updateStockLevels(newStockLevels);
-
-        const newAdjustment = {
-            id: `SA-${Date.now()}`,
-            productId,
-            productName: product.name,
-            section,
-            type,
-            quantity: qty,
-            reason,
-            date: new Date().toISOString(),
-            previousStock: currentStock,
-            newStock,
-        };
-
-        onAdjustmentCreated(newAdjustment);
-        toast({ title: 'Stock Adjusted!', description: `${product.name} stock in ${section} updated to ${newStock}.` });
         setProductId('');
-        setSection('');
+        setSectionId('');
         setType('add');
         setQuantity('');
         setReason('');
@@ -1044,9 +1465,9 @@ const CreateStockAdjustmentForm = ({ products, stockLevels, updateStockLevels, o
                     
                     <div className="space-y-2">
                         <Label>Section</Label>
-                        <Select value={section} onValueChange={setSection} disabled={!productId}>
+                        <Select value={sectionId} onValueChange={setSectionId} disabled={!productId}>
                             <SelectTrigger><Warehouse className="w-4 h-4 mr-2" /><SelectValue placeholder="Select a section" /></SelectTrigger>
-                            <SelectContent>{availableSections.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                            <SelectContent>{sections.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
                         </Select>
                     </div>
 
@@ -1074,8 +1495,8 @@ const CreateStockAdjustmentForm = ({ products, stockLevels, updateStockLevels, o
                         <Input id="reason" placeholder="e.g., Damaged goods, Stock count correction" value={reason} onChange={e => setReason(e.target.value)} required />
                     </div>
 
-                    <Button type="submit" className="w-full">
-                        <SlidersHorizontal className="w-4 h-4 mr-2" /> Submit Adjustment
+                    <Button type="submit" className="w-full" disabled={saving}>
+                        <SlidersHorizontal className="w-4 h-4 mr-2" /> {saving ? 'Submitting...' : 'Submit Adjustment'}
                     </Button>
                 </form>
             </CardContent>
@@ -1110,6 +1531,9 @@ const AdjustmentHistory = ({ adjustments }) => {
                                         <Calendar className="w-3 h-3 mr-1.5 inline" />
                                         {new Date(adj.date).toLocaleString()}
                                     </p>
+                                    {adj.userName && (
+                                      <p className="text-xs text-muted-foreground">by_user: {adj.userName}</p>
+                                    )}
                                 </div>
                                 <div className="text-right shrink-0">
                                     <p className={`text-xl font-bold flex items-center gap-1 justify-end ${adj.type === 'add' ? 'text-green-600' : 'text-red-600'}`}>

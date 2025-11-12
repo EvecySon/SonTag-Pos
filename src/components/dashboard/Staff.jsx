@@ -4,26 +4,43 @@ import { Users, UserPlus, Shield, Clock, Edit } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/use-toast';
+import { api } from '@/lib/api';
 
 const Staff = ({ user }) => {
   const [staff, setStaff] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const saved = localStorage.getItem('loungeStaff');
-    if (saved) {
-      setStaff(JSON.parse(saved));
-    } else {
-      const initial = [
-        { id: 1, name: 'John Doe', role: 'Manager', permissions: ['all'], status: 'active', shift: 'Morning', branch: 'Main Branch' },
-        { id: 2, name: 'Jane Smith', role: 'Barista', permissions: ['pos', 'orders'], status: 'active', shift: 'Morning', branch: 'Main Branch' },
-        { id: 3, name: 'Mike Johnson', role: 'Waiter', permissions: ['pos', 'tables'], status: 'active', shift: 'Evening', branch: 'Main Branch' },
-        { id: 4, name: 'Sarah Williams', role: 'Chef', permissions: ['inventory', 'production'], status: 'off', shift: 'Morning', branch: 'Downtown' },
-        { id: 5, name: 'Tom Brown', role: 'Cashier', permissions: ['pos'], status: 'active', shift: 'Evening', branch: 'Downtown' },
-      ];
-      setStaff(initial);
-      localStorage.setItem('loungeStaff', JSON.stringify(initial));
-    }
-  }, []);
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const branchId = user?.branchId || user?.branch?.id || undefined;
+        let rows;
+        try {
+          rows = await api.users.list(branchId ? { branchId } : {});
+        } catch {
+          rows = [];
+        }
+        const items = Array.isArray(rows?.items) ? rows.items : (Array.isArray(rows) ? rows : []);
+        const mapped = items.map(u => ({
+          id: u.id,
+          name: u.username || u.fullName || u.firstName || u.surname || `user-${u.id}`,
+          role: (u.role && String(u.role)) || 'Staff',
+          permissions: Array.isArray(u.permissions) ? u.permissions : [],
+          status: u.status || (u.active === false ? 'off' : 'active'),
+          shift: u.shift || '—',
+          branch: (u.branch && (u.branch.name || u.branch.title)) || (u.branchName || ''),
+        }));
+        if (!cancelled) setStaff(mapped);
+      } catch {
+        if (!cancelled) setStaff([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.branchId]);
 
   const getRoleColor = (role) => {
     const colors = {
@@ -52,8 +69,16 @@ const Staff = ({ user }) => {
         </Button>
       </div>
 
+      {loading && (
+        <div className="text-sm text-gray-500">Loading staff...</div>
+      )}
+
+      {!loading && staff.length === 0 && (
+        <div className="text-sm text-gray-500">No staff found for this branch.</div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {staff.map((member) => (
+        {!loading && staff.map((member) => (
           <motion.div
             key={member.id}
             whileHover={{ scale: 1.02 }}
@@ -89,7 +114,7 @@ const Staff = ({ user }) => {
                    </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-gray-600">Branch:</span>
-                    <span className="font-semibold">{member.branch}</span>
+                    <span className="font-semibold">{member.branch || '—'}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-gray-600 flex items-center gap-1">
