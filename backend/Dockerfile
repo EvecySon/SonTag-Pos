@@ -8,11 +8,11 @@ WORKDIR /app
 # Copy only backend sources into /app
 COPY backend/package*.json ./
 # Install with devDependencies so Nest CLI is available for build
-RUN npm install --include=dev
+RUN npm install --include=dev && npm install -g @nestjs/cli
 COPY backend/. ./
 
 # Build (no DB access required here)
-RUN npx nest build
+RUN nest build
 
 EXPOSE 4000
 
