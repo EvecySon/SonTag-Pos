@@ -5,14 +5,15 @@ RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Copy application code
-COPY . .
+# Copy only backend sources into /app
+COPY backend/package*.json ./
+RUN npm install
+COPY backend/. ./
 
-# Install dependencies and build (no DB access required here)
-RUN npm install \
-    && npm run build
+# Build (no DB access required here)
+RUN npm run build
 
 EXPOSE 4000
 
 # At runtime (when DATABASE_URL is available on Render), generate client and run migrations, then start
-CMD ["sh", "-c", "npx prisma generate && npx prisma migrate deploy && npm run start:prod"]
+CMD ["sh", "-c", "npx prisma generate --schema=prisma/schema.prisma && npx prisma migrate deploy --schema=prisma/schema.prisma && npm run start:prod"]
